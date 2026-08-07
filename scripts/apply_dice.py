@@ -37,6 +37,17 @@ SEARCH_QUERIES = [
     "Java AWS Kubernetes contract",
 ]
 
+# Load from shared config if available
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "shared_skills.json"
+if CONFIG_PATH.exists():
+    try:
+        import json as _json
+        with open(CONFIG_PATH) as f:
+            _config = _json.load(f)
+        SEARCH_QUERIES = _config.get("search_terms", {}).get("dice", SEARCH_QUERIES)
+    except Exception:
+        pass
+
 # Multiple selectors for Dice login form (SPA — Next.js, fields may render late)
 EMAIL_SELECTORS = [
     'input[name="email"]',

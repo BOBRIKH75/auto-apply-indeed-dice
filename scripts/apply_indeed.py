@@ -36,6 +36,17 @@ SEARCH_QUERIES = [
     "Java AWS Kubernetes contract remote",
 ]
 
+# Load from shared config if available
+CONFIG_PATH = Path(__file__).resolve().parent.parent / "config" / "shared_skills.json"
+if CONFIG_PATH.exists():
+    try:
+        with open(CONFIG_PATH) as f:
+            config = json.load(f)
+        SEARCH_QUERIES = config.get("search_terms", {}).get("indeed", SEARCH_QUERIES)
+        logger.info(f"  Loaded {len(SEARCH_QUERIES)} search queries from shared config")
+    except Exception:
+        pass
+
 SESSION_START = time.time()
 SESSION_LIMIT = 25 * 60  # 25 minutes
 
