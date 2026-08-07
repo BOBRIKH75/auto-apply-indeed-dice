@@ -1,615 +1,293 @@
 #!/usr/bin/env python3
 """
-Auto-Apply to Indeed Jobs using SeleniumBase UC (Undetected Chromedriver) mode.
-Searches for Java/Spring Boot contract jobs and applies via Easy Apply.
-
-PROVEN: github.com/mdmintz/undetected-testing/blob/master/raw_indeed.py
-demonstrates Indeed access from GitHub Actions using SeleniumBase UC + CDP mode.
+Indeed Job Finder via ScraperAPI — No browser needed.
+Routes requests through residential IPs → Indeed returns full job results.
+Jobs saved with clickable Apply URLs → emailed to user for 1-click apply.
 """
 
 import json
 import logging
 import os
-import random
+import re
 import time
+import random
 from datetime import datetime
 from pathlib import Path
+
+import requests
+from bs4 import BeautifulSoup
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("indeed-apply")
 
 # Config
-INDEED_COOKIES = os.environ.get("INDEED_COOKIES", "")
-INDEED_EMAIL = os.environ.get("INDEED_EMAIL", "")
-INDEED_PASSWORD = os.environ.get("INDEED_PASSWORD", "")
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "")
 MAX_APPLY = int(os.environ.get("MAX_APPLY", "15"))
-HEADLESS = os.environ.get("HEADLESS", "1") == "1"
+SCRAPER_API_URL = "https://api.scraperapi.com/"
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent / "screenshots"
-SCREENSHOTS_DIR.mkdir(exist_ok=True)
-
-# Session time limit (25 min — before GitHub Actions 30min timeout)
-SESSION_DURATION_LIMIT = 25 * 60
-
 SEARCH_QUERIES = [
     "Java Spring Boot contract remote",
     "Java developer contract C2C remote",
-    "Java microservices contract",
-    "Spring Boot developer contract",
-    "Java backend developer contract remote",
+    "Java microservices Kafka contract",
+    "Spring Boot backend developer contract",
+    "Java AWS Kubernetes contract remote",
 ]
 
-
-# ─── Human-like delays ───────────────────────────────────────────────────────
-
-def human_delay(min_sec=1.5, max_sec=4.0):
-    """Wait a random time like a human reading a page."""
-    time.sleep(random.uniform(min_sec, max_sec))
-
-
-def between_applications_delay():
-    """Longer delay between job applications to avoid rate limits (15-45s)."""
-    delay = random.uniform(15, 45)
-    logger.info(f"  ⏳ Waiting {delay:.0f}s before next application...")
-    time.sleep(delay)
+SESSION_START = time.time()
+SESSION_LIMIT = 25 * 60  # 25 minutes
 
 
 # ─── Deduplication ────────────────────────────────────────────────────────────
 
-def load_applied() -> dict:
-    """Load previously applied job IDs, titles, and URLs — never apply twice."""
+def load_applied():
     path = DATA_DIR / "applied_indeed.json"
     if path.exists():
         with open(path) as f:
             data = json.load(f)
             if isinstance(data, dict):
-                return {
-                    "ids": set(data.get("ids", [])),
-                    "titles": set(data.get("titles", [])),
-                    "urls": set(data.get("urls", [])),
-                }
+                return data
             else:
-                return {"ids": set(data), "titles": set(), "urls": set()}
-    return {"ids": set(), "titles": set(), "urls": set()}
+                return {"ids": list(data), "titles": [], "urls": []}
+    return {"ids": [], "titles": [], "urls": []}
 
 
-def save_applied(applied: dict):
-    """Save all applied markers."""
+def save_applied(applied):
     path = DATA_DIR / "applied_indeed.json"
     with open(path, "w") as f:
-        json.dump({
-            "ids": list(applied.get("ids", set())),
-            "titles": list(applied.get("titles", set())),
-            "urls": list(applied.get("urls", set())),
-        }, f, indent=2)
+        json.dump(applied, f)
 
 
-def is_already_applied(job: dict, applied: dict) -> bool:
-    """Check ALL ways a job could be a duplicate."""
+def is_already_applied(job, applied):
     job_id = job.get("job_id", "")
-    title_company = f"{job.get('title', '').lower().strip()}|{job.get('company', '').lower().strip()}"
+    title_company = f"{job.get('title', '').lower()}|{job.get('company', '').lower()}"
     url = job.get("url", "")
-
-    if job_id in applied.get("ids", set()):
+    if job_id in applied.get("ids", []):
         return True
-    if title_company in applied.get("titles", set()):
+    if title_company in applied.get("titles", []):
         return True
-    if url in applied.get("urls", set()):
+    if url in applied.get("urls", []):
         return True
     return False
 
 
-def mark_applied(job: dict, applied: dict):
-    """Mark a job as applied in all tracking sets."""
-    applied.setdefault("ids", set()).add(job.get("job_id", ""))
-    title_company = f"{job.get('title', '').lower().strip()}|{job.get('company', '').lower().strip()}"
-    applied.setdefault("titles", set()).add(title_company)
-    applied.setdefault("urls", set()).add(job.get("url", ""))
+def mark_applied(job, applied):
+    applied.setdefault("ids", []).append(job.get("job_id", ""))
+    title_company = f"{job.get('title', '').lower()}|{job.get('company', '').lower()}"
+    applied.setdefault("titles", []).append(title_company)
+    applied.setdefault("urls", []).append(job.get("url", ""))
 
 
-# ─── Screenshots ─────────────────────────────────────────────────────────────
+# ─── ScraperAPI Request ───────────────────────────────────────────────────────
 
-def take_screenshot(sb, name: str):
-    """Save a debug screenshot."""
-    try:
-        path = SCREENSHOTS_DIR / f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-        sb.save_screenshot(str(path))
-        logger.info(f"  📸 Screenshot saved: {path.name}")
-    except Exception as e:
-        logger.warning(f"  Screenshot failed: {e}")
-
-
-# ─── Cookie Auth ──────────────────────────────────────────────────────────────
-
-def set_indeed_cookies(sb):
-    """Set Indeed cookies from INDEED_COOKIES env var after initial navigation."""
-    if not INDEED_COOKIES:
-        return
-
-    logger.info("  Setting Indeed cookies...")
-    cookies_to_set = []
-    for cookie_pair in INDEED_COOKIES.split(";"):
-        cookie_pair = cookie_pair.strip()
-        if "=" in cookie_pair:
-            name, value = cookie_pair.split("=", 1)
-            cookies_to_set.append({
-                "name": name.strip(),
-                "value": value.strip().strip('"'),
-                "domain": ".indeed.com",
-                "path": "/",
-            })
-
-    if cookies_to_set:
-        try:
-            sb.add_cookies(cookies_to_set)
-            logger.info(f"  ✅ Set {len(cookies_to_set)} cookies")
-        except Exception as e:
-            logger.warning(f"  Cookie setting failed: {e}")
-
-
-# ─── Login ────────────────────────────────────────────────────────────────────
-
-def login_indeed(sb) -> bool:
-    """
-    Navigate to Indeed using SeleniumBase UC mode.
-    UC mode patches Chromedriver to avoid bot detection.
-    CDP mode enables stealth browser interactions.
-    """
-    logger.info("Navigating to Indeed with SeleniumBase UC + CDP mode...")
-
-    try:
-        # First navigation — needed before cookies can be set
-        sb.open("https://www.indeed.com")
-        sb.sleep(3)
-        sb.solve_captcha()  # Auto-handles any CAPTCHA
-
-        # Set cookies after first navigation
-        set_indeed_cookies(sb)
-
-        # Navigate to search page
-        sb.open(
-            "https://www.indeed.com/jobs?q=Java+Spring+Boot+contract+remote&l=Remote&fromage=3",
-        )
-        sb.sleep(3)
-        sb.solve_captcha()
-
-        # Check if we got blocked
-        page_source = sb.get_page_source().lower()
-        if "unusual traffic" in page_source or "blocked" in page_source:
-            logger.warning("⚠️ Indeed detected automation — trying again...")
-            sb.sleep(5)
-            sb.solve_captcha()
-
-        logger.info("✅ Indeed search page loaded successfully")
-        take_screenshot(sb, "indeed_loaded")
-        return True
-
-    except Exception as e:
-        logger.error(f"❌ Indeed navigation failed: {e}")
-        take_screenshot(sb, "indeed_failed")
-        return False
-
-
-# ─── Job Search ───────────────────────────────────────────────────────────────
-
-def search_jobs(sb, query: str) -> list:
-    """Search Indeed for jobs matching query using SeleniumBase."""
-    import re
-    jobs = []
-    url = (
+def fetch_indeed_page(query, page=0):
+    """Fetch Indeed search page via ScraperAPI (residential proxy)."""
+    indeed_url = (
         f"https://www.indeed.com/jobs?"
-        f"q={query.replace(' ', '+')}"
-        f"&l=Remote"
-        f"&sc=0kf%3Ajt%28contract%29%3B"
-        f"&fromage=3"
-        f"&sort=date"
+        f"q={query.replace(' ', '+')}&l=Remote&fromage=3&jt=contract&start={page * 10}"
     )
-    logger.info(f"  Searching: {query}")
-
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": indeed_url,
+        "render": "true",
+    }
     try:
-        sb.open(url)
-        sb.sleep(4)
-        sb.solve_captcha()
-        sb.sleep(2)
-        # Scroll to trigger lazy-loaded content
-        for _ in range(3):
-            sb.scroll_down(5)
-            sb.sleep(1)
+        resp = requests.get(SCRAPER_API_URL, params=params, timeout=60)
+        if resp.status_code == 200:
+            return resp.text
+        else:
+            logger.warning(f"    ScraperAPI returned {resp.status_code}")
+            return None
     except Exception as e:
-        logger.warning(f"    Page load failed for: {query} — {e}")
-        return jobs
+        logger.warning(f"    Request failed: {e}")
+        return None
 
-    # Check if page has job content using JavaScript (fastest way)
+
+# ─── Parse Jobs ───────────────────────────────────────────────────────────────
+
+def parse_jobs_json(html):
+    """Parse jobs from Indeed's embedded JSON (most stable method)."""
+    jobs = []
     try:
-        page_html = sb.get_page_source()
-        has_jobs = ("viewjob" in page_html or "data-jk" in page_html or 
-                    "jobTitle" in page_html or "job_seen_beacon" in page_html or
-                    "resultContent" in page_html)
-        if not has_jobs:
-            logger.warning(f"    No job content in page source for: {query}")
-            take_screenshot(sb, f"no_results_{query[:20]}")
-            logger.info(f"    Page source length: {len(page_html)}")
-            # Log a sample of the page to understand structure
-            import re as _re
-            classes = _re.findall(r'class="([^"]{5,30})"', page_html[:5000])
-            logger.info(f"    CSS classes found: {classes[:10]}")
-            return jobs
-        logger.info(f"    ✅ Job content detected in page source")
-    except Exception as e:
-        logger.warning(f"    Could not check page source: {e}")
-        # Continue anyway — try to parse
-
-    # Parse jobs using BeautifulSoup for reliable extraction
-    try:
-        soup = sb.get_beautiful_soup()
-
-        # Try multiple selector strategies for Indeed's ever-changing DOM
-        title_links = []
-        for selector in [
-            "h2.jobTitle a",
-            "a[data-jk]",
-            "h2 a[id^='job']",
-            "a[id*='job']",
-            "a[href*='/viewjob']",
-            "a[href*='jk=']",
-            "h2 a",  # Broad fallback
-        ]:
-            title_links = soup.select(selector)
-            if title_links:
-                logger.info(f"    Found {len(title_links)} jobs with selector: {selector}")
-                break
-
-        if not title_links:
-            # Ultra-fallback: find any link containing "viewjob" or "jk=" in href
-            all_links = soup.find_all("a", href=True)
-            title_links = [a for a in all_links if "/viewjob" in a.get("href", "") or "jk=" in a.get("href", "")]
-            if title_links:
-                logger.info(f"    Found {len(title_links)} jobs via href fallback")
-            else:
-                logger.warning(f"    No job links found in page HTML")
-                # Log what IS on the page for debugging
-                all_h2 = soup.find_all("h2")
-                logger.info(f"    H2 tags on page: {[h.get_text(strip=True)[:30] for h in all_h2[:5]]}")
-                all_a_count = len(soup.find_all("a"))
-                logger.info(f"    Total links on page: {all_a_count}")
-
-        for link in title_links[:15]:
-            try:
-                title = link.get_text(strip=True)
-                href = link.get("href", "")
-                job_id = link.get("data-jk", "")
-
-                # Extract job ID from href if not in data-jk
-                if not job_id and href:
-                    match = re.search(r"jk=([a-f0-9]+)", href)
-                    if match:
-                        job_id = match.group(1)
-                    else:
-                        job_id = href[:32]
-
-                if not href.startswith("http"):
-                    href = f"https://www.indeed.com{href}"
-
-                # Get company from parent card
-                company = "Unknown"
-                card = link.find_parent(class_=lambda c: c and ("job_seen_beacon" in c or "resultContent" in c))
-                if card:
-                    comp_el = card.select_one(
-                        "[data-testid='company-name'], span.companyName, span[class*='company']"
-                    )
-                    if comp_el:
-                        company = comp_el.get_text(strip=True)
-
-                if title and job_id:
-                    jobs.append({
-                        "title": title,
-                        "company": company,
-                        "job_id": job_id,
-                        "url": f"https://www.indeed.com/viewjob?jk={job_id}" if len(job_id) < 20 else href,
-                    })
-            except Exception:
-                continue
-    except Exception as e:
-        logger.warning(f"  Search parsing error: {e}")
-
+        match = re.search(
+            r'window\.mosaic\.providerData\["mosaic-provider-jobcards"\]\s*=\s*(\{.*?\});\s*</script>',
+            html, re.DOTALL
+        )
+        if not match:
+            # Try alternative pattern
+            match = re.search(
+                r'"mosaic-provider-jobcards":\s*(\{.*?"results"\s*:\s*\[.*?\]\s*\})',
+                html, re.DOTALL
+            )
+        if match:
+            data = json.loads(match.group(1))
+            results = data.get("metaData", {}).get("mosaicProviderJobCardsModel", {}).get("results", [])
+            if not results:
+                # Try alternative path
+                results = data.get("results", [])
+            for r in results:
+                jobs.append({
+                    "title": r.get("title", "Unknown"),
+                    "company": r.get("company", "Unknown"),
+                    "location": r.get("formattedLocation", ""),
+                    "salary": r.get("salarySnippet", {}).get("text", ""),
+                    "job_id": r.get("jobkey", ""),
+                    "url": f"https://www.indeed.com/viewjob?jk={r.get('jobkey', '')}",
+                })
+    except (json.JSONDecodeError, AttributeError) as e:
+        logger.debug(f"    JSON parse failed: {e}")
     return jobs
 
 
-# ─── Apply to Job ─────────────────────────────────────────────────────────────
-
-def apply_to_job(sb, job: dict) -> dict:
-    """
-    Navigate to job page and attempt to apply via Easy Apply.
-    Falls back to 'manual_apply' if blocked or not Easy Apply.
-    """
-    result = {
-        "title": job["title"],
-        "company": job["company"],
-        "url": job["url"],
-        "status": "pending",
-        "timestamp": datetime.now().isoformat(),
-    }
-
+def parse_jobs_html(html):
+    """Fallback: parse jobs from HTML using BeautifulSoup."""
+    jobs = []
     try:
-        # Navigate to job page
-        sb.open(job["url"])
-        sb.sleep(3)
-        sb.solve_captcha()
+        soup = BeautifulSoup(html, "html.parser")
+        cards = soup.find_all("div", class_="job_seen_beacon")
+        if not cards:
+            # Try alternative selector
+            cards = soup.find_all("li", class_=lambda c: c and "css-" in c and "eu4oa1w0" in c)
+        for card in cards:
+            title_el = card.select_one("h2.jobTitle span, h2 a span, a.jcs-JobTitle span")
+            company_el = card.select_one("[data-testid='company-name'], span.companyName")
+            link_el = card.select_one("a[data-jk], h2.jobTitle a, a.jcs-JobTitle")
 
-        # Check for login redirect
-        current_url = sb.get_current_url().lower()
-        if any(x in current_url for x in ["login", "signin", "sign-in", "account/verify"]):
-            logger.warning("  ⚠️ Redirected to login — session expired")
-            result["status"] = "session_expired"
-            result["error"] = "Redirected to login page"
-            take_screenshot(sb, "session_expired")
-            return result
+            title = title_el.get_text(strip=True) if title_el else ""
+            company = company_el.get_text(strip=True) if company_el else ""
+            job_id = link_el.get("data-jk", "") if link_el else ""
+            href = link_el.get("href", "") if link_el else ""
 
-        # Look for Easy Apply / Apply Now button
-        apply_clicked = False
-        apply_selectors = [
-            "button#indeedApplyButton",
-            "button[id*='indeedApply']",
-            "button:contains('Apply now')",
-            "button:contains('Easy Apply')",
-            "a:contains('Apply now')",
-            "button.indeed-apply-button",
-            "[data-testid='indeedApplyButton']",
-        ]
+            if not job_id and href:
+                m = re.search(r"jk=([a-f0-9]+)", href)
+                if m:
+                    job_id = m.group(1)
 
-        for selector in apply_selectors:
-            try:
-                if sb.is_element_present(selector):
-                    sb.click(selector)
-                    apply_clicked = True
-                    logger.info(f"  🖱️ Clicked apply button")
-                    sb.sleep(3)
-                    sb.solve_captcha()
-                    break
-            except Exception:
-                continue
-
-        if not apply_clicked:
-            # No Easy Apply button — save for manual apply
-            result["status"] = "manual_apply"
-            result["error"] = "No Easy Apply button found"
-            logger.info(f"  📧 Saved for email: {job['title']} @ {job['company']}")
-            return result
-
-        # Handle the apply flow (multi-step form)
-        result = handle_apply_flow(sb, job, result)
-
+            if title and job_id:
+                jobs.append({
+                    "title": title,
+                    "company": company or "Unknown",
+                    "location": "",
+                    "salary": "",
+                    "job_id": job_id,
+                    "url": f"https://www.indeed.com/viewjob?jk={job_id}",
+                })
     except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)[:200]
-        logger.error(f"  ❌ Error: {e}")
-        take_screenshot(sb, f"error_{job['job_id'][:8]}")
-
-    return result
+        logger.debug(f"    HTML parse failed: {e}")
+    return jobs
 
 
-def handle_apply_flow(sb, job: dict, result: dict) -> dict:
-    """Handle Indeed's multi-step apply form using SeleniumBase."""
-    try:
-        max_steps = 6
-        for step in range(max_steps):
-            sb.sleep(2)
+# ─── Search ───────────────────────────────────────────────────────────────────
 
-            # Check if application was submitted
-            page_text = sb.get_page_source().lower()
-            if any(x in page_text for x in [
-                "application has been submitted",
-                "you have applied",
-                "successfully applied",
-                "thank you for applying",
-            ]):
-                result["status"] = "submitted"
-                logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
-                return result
+def search_jobs(query):
+    """Search Indeed for jobs matching query (up to 3 pages = 30 jobs)."""
+    all_jobs = []
+    for page in range(3):
+        if time.time() - SESSION_START > SESSION_LIMIT:
+            logger.info("⏰ Session time limit — stopping search")
+            break
 
-            # Fill screening questions before advancing
-            fill_screening_questions(sb)
+        logger.info(f"    Page {page + 1} for: {query}")
+        html = fetch_indeed_page(query, page)
+        if not html:
+            break
 
-            # Look for Continue/Next/Submit button
-            advance_clicked = False
-            for btn_text in ["Continue", "Next", "Submit your application", "Apply", "Submit", "Review"]:
-                try:
-                    selector = f"button:contains('{btn_text}')"
-                    if sb.is_element_visible(selector):
-                        sb.click(selector)
-                        advance_clicked = True
-                        sb.sleep(2)
-                        sb.solve_captcha()
-                        break
-                except Exception:
-                    continue
+        # Try JSON first (more stable), then HTML fallback
+        jobs = parse_jobs_json(html)
+        if not jobs:
+            jobs = parse_jobs_html(html)
 
-            if not advance_clicked:
-                # Try generic submit-like buttons
-                try:
-                    if sb.is_element_visible("button[type='submit']"):
-                        sb.click("button[type='submit']")
-                        sb.sleep(2)
-                        sb.solve_captcha()
-                        advance_clicked = True
-                except Exception:
-                    pass
+        if not jobs:
+            logger.info(f"    No jobs found on page {page + 1}")
+            break
 
-            if not advance_clicked:
-                break
+        all_jobs.extend(jobs)
+        logger.info(f"    Found {len(jobs)} jobs on page {page + 1}")
 
-        # Final check
-        page_text = sb.get_page_source().lower()
-        if any(x in page_text for x in ["submitted", "applied", "thank you"]):
-            result["status"] = "submitted"
-            logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
-        else:
-            result["status"] = "incomplete"
-            result["error"] = "Could not complete all apply steps"
-            take_screenshot(sb, f"incomplete_{job['job_id'][:8]}")
+        # Don't fetch more pages if we have enough
+        if len(all_jobs) >= MAX_APPLY * 2:
+            break
 
-    except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)[:200]
-        take_screenshot(sb, f"apply_error_{job['job_id'][:8]}")
+        # Human delay between pages
+        time.sleep(random.uniform(2, 4))
 
-    return result
-
-
-def fill_screening_questions(sb):
-    """Try to fill common screening questions on Indeed apply forms."""
-    try:
-        # Work authorization — click Yes
-        try:
-            auth_questions = sb.find_elements("fieldset")
-            for fieldset in auth_questions:
-                text = fieldset.text.lower()
-                if "authorized" in text or "legally" in text or "work in" in text:
-                    try:
-                        yes_label = fieldset.find_element("xpath", ".//label[contains(text(),'Yes')]")
-                        yes_label.click()
-                    except Exception:
-                        pass
-                elif "sponsorship" in text or "sponsor" in text:
-                    try:
-                        no_label = fieldset.find_element("xpath", ".//label[contains(text(),'No')]")
-                        no_label.click()
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-        # Experience years
-        try:
-            inputs = sb.find_elements("input[type='number']")
-            for inp in inputs:
-                parent_text = sb.execute_script(
-                    "return arguments[0].closest('fieldset, div[role=\"group\"], .ia-BasePage-component')?.textContent || ''",
-                    inp,
-                ).lower()
-                if "experience" in parent_text and "year" in parent_text:
-                    sb.execute_script("arguments[0].value = '10'", inp)
-                    sb.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles: true}))", inp)
-                elif "salary" in parent_text or "rate" in parent_text or "compensation" in parent_text:
-                    sb.execute_script("arguments[0].value = '85'", inp)
-                    sb.execute_script("arguments[0].dispatchEvent(new Event('input', {bubbles: true}))", inp)
-        except Exception:
-            pass
-
-    except Exception:
-        pass
+    return all_jobs
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    """Main entry point — SeleniumBase UC mode for Indeed."""
     logger.info("=" * 60)
-    logger.info("INDEED AUTO-APPLY AGENT (SeleniumBase UC Mode)")
-    logger.info(f"Max applications: {MAX_APPLY}")
-    logger.info(f"Headless: {HEADLESS}")
+    logger.info("INDEED JOB FINDER (ScraperAPI — No Browser)")
+    logger.info(f"Max jobs to process: {MAX_APPLY}")
     logger.info("=" * 60)
 
-    if not INDEED_COOKIES:
-        logger.warning("⚠️ INDEED_COOKIES not set — running without session cookies")
+    if not SCRAPER_API_KEY:
+        logger.error("❌ SCRAPER_API_KEY not set!")
+        return
 
     applied = load_applied()
     results = []
-    applied_count = 0
-    session_start = time.time()
+    processed = 0
 
-    # SeleniumBase UC mode: patches Chromedriver to avoid detection
-    # CDP mode: enables stealth browser interactions
-    from seleniumbase import SB
+    # Search all queries
+    all_jobs = []
+    for query in SEARCH_QUERIES:
+        if time.time() - SESSION_START > SESSION_LIMIT:
+            break
+        logger.info(f"  Searching: {query}")
+        jobs = search_jobs(query)
+        all_jobs.extend(jobs)
+        logger.info(f"    Total so far: {len(all_jobs)}")
+        time.sleep(random.uniform(2, 5))
 
-    with SB(uc=True, test=True, guest=True) as sb:
-        sb.activate_cdp_mode()
+    # Deduplicate
+    unique_jobs = []
+    seen = set()
+    for job in all_jobs:
+        if job["job_id"] in seen:
+            continue
+        if is_already_applied(job, applied):
+            continue
+        seen.add(job["job_id"])
+        unique_jobs.append(job)
 
-        # Login / initial navigation
-        if not login_indeed(sb):
-            logger.error("Failed to access Indeed — aborting")
-            return
+    logger.info(f"\n{'=' * 60}")
+    logger.info(f"Total found: {len(all_jobs)}")
+    logger.info(f"Unique new: {len(unique_jobs)}")
+    logger.info(f"Already applied (skipped): {len(all_jobs) - len(unique_jobs)}")
+    logger.info(f"{'=' * 60}\n")
 
-        # Search across all queries
-        all_jobs = []
-        for query in SEARCH_QUERIES:
-            jobs = search_jobs(sb, query)
-            all_jobs.extend(jobs)
-            logger.info(f"    Found {len(jobs)} jobs")
-            human_delay(2, 5)
+    # Process jobs (mark as manual_apply with clickable URLs)
+    for job in unique_jobs[:MAX_APPLY]:
+        if time.time() - SESSION_START > SESSION_LIMIT:
+            break
 
-        # Deduplicate — NEVER apply to same job twice
-        seen = set()
-        unique_jobs = []
-        for job in all_jobs:
-            if job["job_id"] in seen:
-                continue
-            if is_already_applied(job, applied):
-                continue
-            seen.add(job["job_id"])
-            unique_jobs.append(job)
+        result = {
+            "title": job["title"],
+            "company": job["company"],
+            "url": job["url"],
+            "status": "manual_apply",
+            "error": "Click Easy Apply link in email",
+        }
+        results.append(result)
+        mark_applied(job, applied)
+        processed += 1
+        logger.info(f"  📧 {job['title']} @ {job['company']} → {job['url']}")
 
-        logger.info(f"\n{'=' * 60}")
-        logger.info(f"Total unique new jobs: {len(unique_jobs)}")
-        logger.info(f"Already applied (skipped): {len(all_jobs) - len(unique_jobs)}")
-        logger.info(f"{'=' * 60}\n")
-
-        # Apply to jobs
-        for job in unique_jobs[:MAX_APPLY]:
-            # Check session time limit (25 min)
-            if time.time() - session_start > SESSION_DURATION_LIMIT:
-                logger.info("⏰ Session time limit reached (25 min) — stopping")
-                break
-
-            if applied_count >= MAX_APPLY:
-                break
-
-            logger.info(f"\nApplying to: {job['title']} @ {job['company']}")
-            human_delay(1, 3)
-
-            result = apply_to_job(sb, job)
-            results.append(result)
-
-            if result["status"] == "submitted":
-                mark_applied(job, applied)
-                applied_count += 1
-            elif result["status"] == "manual_apply":
-                # Still mark as applied (will be in email report)
-                mark_applied(job, applied)
-                applied_count += 1
-            elif result["status"] == "session_expired":
-                logger.error("🛑 Session expired — stopping all applications")
-                break
-            else:
-                logger.info(f"  ⚠️ {result['status']}: {result.get('error', 'unknown')}")
-
-            # Wait 15-45 seconds between applications (avoids rate limiting)
-            if applied_count < MAX_APPLY:
-                between_applications_delay()
-
-        take_screenshot(sb, "indeed_final")
-
-    # Save results
+    # Save
     save_applied(applied)
 
     results_path = DATA_DIR / "apply_results_indeed.json"
     with open(results_path, "w") as f:
         json.dump(results, f, indent=2)
 
-    # Summary
-    submitted = [r for r in results if r["status"] == "submitted"]
-    manual = [r for r in results if r["status"] == "manual_apply"]
-    failed = [r for r in results if r["status"] not in ("submitted", "manual_apply")]
-
     logger.info(f"\n{'=' * 60}")
-    logger.info("INDEED APPLY COMPLETE")
-    logger.info(f"  ✅ Applied (auto):   {len(submitted)}")
-    logger.info(f"  📧 Manual (email):   {len(manual)}")
-    logger.info(f"  ❌ Failed:           {len(failed)}")
-    logger.info(f"  📊 Total attempted:  {len(results)}")
+    logger.info("INDEED COMPLETE")
+    logger.info(f"  📧 Jobs found for email: {processed}")
+    logger.info(f"  🔗 Each has a clickable Indeed Easy Apply link")
     logger.info(f"{'=' * 60}")
 
 

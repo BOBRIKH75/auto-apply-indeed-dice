@@ -22,7 +22,7 @@ permissions:
 jobs:
   apply-indeed:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -31,32 +31,21 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: |
-          pip install seleniumbase requests
-          seleniumbase install chromedriver
-          sudo apt-get install -y xvfb
+        run: pip install requests beautifulsoup4
 
       - name: Apply on Indeed
         if: ${{ github.event.inputs.platform != 'dice' }}
         continue-on-error: true
         env:
-          INDEED_COOKIES: ${{ secrets.INDEED_COOKIES }}
-          INDEED_EMAIL: ${{ secrets.INDEED_EMAIL }}
-          INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
-          DISPLAY: ":99"
-        run: |
-          Xvfb :99 -screen 0 1280x1024x24 &
-          sleep 2
-          cd scripts && python apply_indeed.py
+        run: cd scripts && python apply_indeed.py
 
       - name: Upload Indeed results
         uses: actions/upload-artifact@v4
         with:
           name: indeed-results-${{ github.run_number }}
           path: data/
-
-      - name: Upload Indeed debug screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
