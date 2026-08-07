@@ -32,14 +32,16 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install playwright requests
-          playwright install firefox
+          pip install seleniumbase requests
+          seleniumbase install chromedriver
 
       - name: Apply on Indeed
         if: ${{ github.event.inputs.platform != 'dice' }}
         continue-on-error: true
         env:
           INDEED_COOKIES: ${{ secrets.INDEED_COOKIES }}
+          INDEED_EMAIL: ${{ secrets.INDEED_EMAIL }}
+          INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_indeed.py
