@@ -1,0 +1,46 @@
+name: "Refresh Cookies (Weekly)"
+
+on:
+  schedule:
+    - cron: "0 15 * * 0"  # Every Sunday at 9:00 AM MT
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-dice-cookies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install firefox
+
+      - name: Refresh Dice cookies via login
+        env:
+          DICE_EMAIL: ${{ secrets.DICE_EMAIL }}
+          DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
+        run: |
+          python scripts/refresh_cookies.py
+
+      - name: Update DICE_COOKIES secret
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -f data/dice_cookies_new.txt ]; then
+            gh secret set DICE_COOKIES < data/dice_cookies_new.txt
+            echo "✅ DICE_COOKIES refreshed!"
+          else
+            echo "⚠️ No new cookies generated"
+          fi
+
+      - name: Cleanup
+        run: rm -f data/dice_cookies_new.txt data/indeed_cookies_new.txt
