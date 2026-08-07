@@ -83,12 +83,39 @@ def mark_applied(job: dict, applied: dict):
 
 
 def login_dice(page):
-    """Login to Dice — tries cookies first, then email/password fallback."""
+    """Login to Dice — uses email/password for full session (required for wizard apply)."""
     logger.info("Logging into Dice...")
 
-    # Try cookies first
+    # MUST use email/password — cookies don't work for the apply wizard
+    if DICE_EMAIL and DICE_PASSWORD:
+        page.goto("https://www.dice.com/dashboard/login", timeout=60000)
+        time.sleep(4)
+        try:
+            # Enter email
+            email_input = page.wait_for_selector('input[name="email"], input[type="email"]', timeout=10000)
+            email_input.fill(DICE_EMAIL)
+            page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Continue")')
+            time.sleep(4)
+
+            # Enter password
+            pass_input = page.wait_for_selector('input[name="password"], input[type="password"]', timeout=10000)
+            pass_input.fill(DICE_PASSWORD)
+            page.click('button[type="submit"], button:has-text("Sign In")')
+            time.sleep(5)
+
+            # Verify login
+            if "login" not in page.url.lower():
+                logger.info("✅ Logged into Dice via email/password (full session)")
+                return True
+            else:
+                logger.error("❌ Dice login failed — still on login page")
+        except Exception as e:
+            logger.error(f"❌ Dice email/password login failed: {e}")
+
+    # Fallback: cookies (may only work for search, not wizard)
     if DICE_COOKIES:
-        page.goto("https://www.dice.com/")
+        logger.info("  Trying cookie fallback...")
+        page.goto("https://www.dice.com/", timeout=60000)
         time.sleep(2)
         cookies_to_set = []
         for cookie_pair in DICE_COOKIES.split(";"):
@@ -102,34 +129,14 @@ def login_dice(page):
                     "path": "/",
                 })
         page.context.add_cookies(cookies_to_set)
-        page.goto("https://www.dice.com/home-feed")
+        page.goto("https://www.dice.com/home-feed", timeout=60000)
         time.sleep(3)
         if "home-feed" in page.url or "dashboard" in page.url:
-            logger.info("✅ Logged into Dice via cookies")
+            logger.info("✅ Logged into Dice via cookies (limited session)")
             return True
 
-    # Fallback: email + password
-    if DICE_EMAIL and DICE_PASSWORD:
-        logger.info("  Cookies failed, trying email/password...")
-        page.goto("https://www.dice.com/dashboard/login")
-        time.sleep(3)
-        try:
-            email_input = page.wait_for_selector('input[name="email"], input[type="email"]', timeout=5000)
-            email_input.fill(DICE_EMAIL)
-            page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Continue")')
-            time.sleep(3)
-            pass_input = page.wait_for_selector('input[name="password"], input[type="password"]', timeout=5000)
-            pass_input.fill(DICE_PASSWORD)
-            page.click('button[type="submit"], button:has-text("Sign In")')
-            time.sleep(4)
-            if "dice.com" in page.url and "login" not in page.url:
-                logger.info("✅ Logged into Dice via email/password")
-                return True
-        except Exception as e:
-            logger.warning(f"  Email/password login failed: {e}")
-
-    logger.warning("⚠️ Could not verify Dice login — proceeding anyway")
-    return True
+    logger.error("❌ All Dice login methods failed")
+    return False
 
 
 def search_jobs(page, query: str) -> list[dict]:
