@@ -35,19 +35,50 @@ SEARCH_QUERIES = [
 
 
 def load_applied():
-    """Load previously applied job IDs."""
+    """Load previously applied job IDs, titles, and URLs — never apply twice."""
     path = DATA_DIR / "applied_dice.json"
     if path.exists():
         with open(path) as f:
-            return set(json.load(f))
-    return set()
+            data = json.load(f)
+            if isinstance(data, dict):
+                return data
+            else:
+                return {"ids": set(data), "titles": set(), "urls": set()}
+    return {"ids": set(), "titles": set(), "urls": set()}
 
 
-def save_applied(applied: set):
-    """Save applied job IDs."""
+def save_applied(applied: dict):
+    """Save all applied markers."""
     path = DATA_DIR / "applied_dice.json"
     with open(path, "w") as f:
-        json.dump(list(applied), f)
+        json.dump({
+            "ids": list(applied.get("ids", set())),
+            "titles": list(applied.get("titles", set())),
+            "urls": list(applied.get("urls", set())),
+        }, f)
+
+
+def is_already_applied(job: dict, applied: dict) -> bool:
+    """Check ALL ways a job could be a duplicate."""
+    job_id = job.get("job_id", "")
+    title_company = f"{job.get('title', '').lower().strip()}|{job.get('company', '').lower().strip()}"
+    url = job.get("url", "")
+
+    if job_id in applied.get("ids", set()):
+        return True
+    if title_company in applied.get("titles", set()):
+        return True
+    if url in applied.get("urls", set()):
+        return True
+    return False
+
+
+def mark_applied(job: dict, applied: dict):
+    """Mark a job as applied in all tracking sets."""
+    applied.setdefault("ids", set()).add(job.get("job_id", ""))
+    title_company = f"{job.get('title', '').lower().strip()}|{job.get('company', '').lower().strip()}"
+    applied.setdefault("titles", set()).add(title_company)
+    applied.setdefault("urls", set()).add(job.get("url", ""))
 
 
 def login_dice(page):
@@ -271,17 +302,20 @@ def main():
             logger.info(f"    Found {len(jobs)} jobs")
             human_delay(2, 5)  # Pause between searches
 
-        # Deduplicate
+        # Deduplicate — NEVER apply to same job twice (checks ID + title + URL)
         seen = set()
         unique_jobs = []
         for job in all_jobs:
-            if job["job_id"] not in seen and job["job_id"] not in applied:
-                seen.add(job["job_id"])
-                unique_jobs.append(job)
+            if job["job_id"] in seen:
+                continue
+            if is_already_applied(job, applied):
+                continue
+            seen.add(job["job_id"])
+            unique_jobs.append(job)
 
         logger.info(f"\n{'='*60}")
         logger.info(f"Total unique new jobs: {len(unique_jobs)}")
-        logger.info(f"Already applied: {len(applied)}")
+        logger.info(f"Already applied (skipped): {len(all_jobs) - len(unique_jobs)}")
         logger.info(f"{'='*60}\n")
 
         # Apply with human-like behavior
@@ -305,7 +339,7 @@ def main():
             results.append(result)
 
             if result["status"] == "submitted":
-                applied.add(job["job_id"])
+                mark_applied(job, applied)
                 applied_count += 1
             else:
                 logger.info(f"  ⚠️ {result['status']}: {result['error']}")
