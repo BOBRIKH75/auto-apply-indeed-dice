@@ -201,8 +201,18 @@ def apply_to_job(page, job: dict) -> dict:
     result = {"title": job["title"], "company": job["company"], "url": job["url"], "status": "unknown", "error": ""}
 
     try:
-        page.goto(job["url"])
+        page.goto(job["url"], timeout=30000)
         time.sleep(4)  # Wait for full page load
+
+        # Scroll down to trigger lazy-loaded elements
+        page.evaluate("window.scrollTo(0, 300)")
+        time.sleep(2)
+
+        # Wait specifically for the apply web component
+        try:
+            page.wait_for_selector('apply-button-wc, [class*="apply"], button:has-text("Apply")', timeout=8000)
+        except PlaywrightTimeout:
+            pass  # Continue anyway — try other methods
 
         # Dice uses various apply button patterns
         apply_btn = None
@@ -230,26 +240,52 @@ def apply_to_job(page, job: dict) -> dict:
         # Also try clicking inside shadow DOM (Dice uses web components)
         if not apply_btn:
             try:
-                # Try to find any clickable element with "apply" text
-                page.evaluate("""
+                # Dice's apply button is inside a web component's shadow DOM
+                clicked = page.evaluate("""
                     () => {
-                        const btns = document.querySelectorAll('button, a, [role="button"]');
-                        for (const btn of btns) {
-                            if (btn.textContent.toLowerCase().includes('apply') && btn.offsetParent !== null) {
-                                btn.click();
-                                return true;
+                        // Try finding apply-button-wc and clicking inside its shadow
+                        const wc = document.querySelector('apply-button-wc, dhi-wc-apply-button');
+                        if (wc && wc.shadowRoot) {
+                            const btn = wc.shadowRoot.querySelector('button, a');
+                            if (btn) { btn.click(); return 'shadow-clicked'; }
+                        }
+                        
+                        // Try all shadow DOMs on the page
+                        const allElements = document.querySelectorAll('*');
+                        for (const el of allElements) {
+                            if (el.shadowRoot) {
+                                const btns = el.shadowRoot.querySelectorAll('button, a');
+                                for (const btn of btns) {
+                                    const text = btn.textContent.toLowerCase();
+                                    if (text.includes('apply') && btn.offsetParent !== null) {
+                                        btn.click();
+                                        return 'shadow-deep-clicked';
+                                    }
+                                }
                             }
                         }
-                        return false;
+                        
+                        // Last resort: find ANY element with apply text
+                        const all = document.querySelectorAll('*');
+                        for (const el of all) {
+                            if (el.textContent.trim().toLowerCase() === 'easy apply' || 
+                                el.textContent.trim().toLowerCase() === 'apply now' ||
+                                el.textContent.trim().toLowerCase() === 'apply') {
+                                if (el.offsetParent !== null && el.tagName !== 'SPAN') {
+                                    el.click();
+                                    return 'text-clicked';
+                                }
+                            }
+                        }
+                        return null;
                     }
                 """)
-                time.sleep(3)
-                # Check if apply modal appeared
-                page_text = page.inner_text("body")[:1000].lower()
-                if "submit" in page_text or "resume" in page_text or "application" in page_text:
-                    apply_btn = True  # Clicked via JS
-            except Exception:
-                pass
+                if clicked:
+                    logger.info(f"    Apply clicked via: {clicked}")
+                    time.sleep(3)
+                    apply_btn = True
+            except Exception as e:
+                logger.warning(f"    Shadow DOM search failed: {e}")
 
         if not apply_btn:
             # Debug: log what buttons ARE on the page
