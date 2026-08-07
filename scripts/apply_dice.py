@@ -197,124 +197,105 @@ def search_jobs(page, query: str) -> list[dict]:
 
 
 def apply_to_job(page, job: dict) -> dict:
-    """Apply to a Dice job."""
+    """Apply to a Dice job using the direct wizard URL."""
     result = {"title": job["title"], "company": job["company"], "url": job["url"], "status": "unknown", "error": ""}
 
     try:
-        page.goto(job["url"], timeout=30000)
-        time.sleep(4)  # Wait for full page load
+        # Extract job ID from URL (format: /job-detail/<uuid>)
+        job_id = job["job_id"]
+        if "/" in job_id:
+            job_id = job_id.split("/")[-1].split("?")[0]
 
-        # Scroll down to trigger lazy-loaded elements
-        page.evaluate("window.scrollTo(0, 300)")
-        time.sleep(2)
+        # Go DIRECTLY to the application wizard (not the job detail page)
+        wizard_url = f"https://www.dice.com/job-applications/{job_id}/wizard"
+        logger.info(f"    Opening wizard: {wizard_url}")
+        page.goto(wizard_url, timeout=30000)
+        time.sleep(4)
 
-        # Wait specifically for the apply web component
-        try:
-            page.wait_for_selector('apply-button-wc, [class*="apply"], button:has-text("Apply")', timeout=8000)
-        except PlaywrightTimeout:
-            pass  # Continue anyway — try other methods
+        # Check if we landed on the wizard or got redirected
+        current_url = page.url
+        page_text = page.inner_text("body")[:2000].lower()
 
-        # Dice uses various apply button patterns
-        apply_btn = None
-        for selector in [
-            'apply-button-wc',                          # Dice's web component
-            'button:has-text("Easy Apply")',
-            'button:has-text("Apply Now")',
-            'button:has-text("Apply")',
-            'a:has-text("Easy Apply")',
-            'a:has-text("Apply Now")',
-            'a:has-text("Apply")',
-            '[data-cy="apply-button"]',
-            '#applyButton',
-            'dhi-wc-apply-button',                      # Another web component name
-            '.btn-apply',
-        ]:
-            try:
-                el = page.query_selector(selector)
-                if el and el.is_visible():
-                    apply_btn = el
-                    break
-            except Exception:
-                continue
-
-        # Also try clicking inside shadow DOM (Dice uses web components)
-        if not apply_btn:
-            try:
-                # Dice's apply button is inside a web component's shadow DOM
-                clicked = page.evaluate("""
-                    () => {
-                        // Try finding apply-button-wc and clicking inside its shadow
-                        const wc = document.querySelector('apply-button-wc, dhi-wc-apply-button');
-                        if (wc && wc.shadowRoot) {
-                            const btn = wc.shadowRoot.querySelector('button, a');
-                            if (btn) { btn.click(); return 'shadow-clicked'; }
-                        }
-                        
-                        // Try all shadow DOMs on the page
-                        const allElements = document.querySelectorAll('*');
-                        for (const el of allElements) {
-                            if (el.shadowRoot) {
-                                const btns = el.shadowRoot.querySelectorAll('button, a');
-                                for (const btn of btns) {
-                                    const text = btn.textContent.toLowerCase();
-                                    if (text.includes('apply') && btn.offsetParent !== null) {
-                                        btn.click();
-                                        return 'shadow-deep-clicked';
-                                    }
-                                }
-                            }
-                        }
-                        
-                        // Last resort: find ANY element with apply text
-                        const all = document.querySelectorAll('*');
-                        for (const el of all) {
-                            if (el.textContent.trim().toLowerCase() === 'easy apply' || 
-                                el.textContent.trim().toLowerCase() === 'apply now' ||
-                                el.textContent.trim().toLowerCase() === 'apply') {
-                                if (el.offsetParent !== null && el.tagName !== 'SPAN') {
-                                    el.click();
-                                    return 'text-clicked';
-                                }
-                            }
-                        }
-                        return null;
-                    }
-                """)
-                if clicked:
-                    logger.info(f"    Apply clicked via: {clicked}")
-                    time.sleep(3)
-                    apply_btn = True
-            except Exception as e:
-                logger.warning(f"    Shadow DOM search failed: {e}")
-
-        if not apply_btn:
-            # Debug: log what buttons ARE on the page
-            try:
-                all_buttons = page.evaluate("""
-                    () => {
-                        const btns = document.querySelectorAll('button, a[class*=btn], [role="button"]');
-                        return Array.from(btns).slice(0, 10).map(b => ({
-                            tag: b.tagName,
-                            text: b.textContent.trim().slice(0, 50),
-                            visible: b.offsetParent !== null
-                        }));
-                    }
-                """)
-                logger.info(f"    DEBUG buttons on page: {json.dumps(all_buttons[:5])}")
-            except Exception:
-                pass
-
-            result["status"] = "no_apply_button"
-            result["error"] = "No Apply button found"
+        # Check for "already applied"
+        if "already" in page_text and "applied" in page_text:
+            result["status"] = "already_applied"
+            result["error"] = "Already applied to this job"
             return result
 
-        # If we found a button element (not already clicked via JS)
-        if apply_btn is not True:
-            apply_btn.click()
-            time.sleep(3)
+        # Check for errors/redirects
+        if "login" in current_url.lower() or "sign" in current_url.lower():
+            result["status"] = "not_logged_in"
+            result["error"] = "Redirected to login — cookies expired"
+            return result
 
-        # Handle the apply flow
-        result = handle_dice_easy_apply(page, job, result)
+        if "error" in page_text[:200] or "not found" in page_text[:200]:
+            result["status"] = "wizard_error"
+            result["error"] = "Wizard page not available"
+            return result
+
+        # We're on the wizard — look for resume/submit flow
+        # Step 1: Check if resume is pre-selected (usually is from profile)
+        # Step 2: Click through to submit
+
+        max_steps = 5
+        for step in range(max_steps):
+            time.sleep(2)
+
+            # Check if we successfully submitted
+            page_text = page.inner_text("body")[:1000].lower()
+            if any(w in page_text for w in ["successfully", "submitted", "thank you", "application received", "applied"]):
+                result["status"] = "submitted"
+                logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
+                return result
+
+            # Find and click the next/submit button
+            clicked = False
+            for btn_text in ["Submit", "Next", "Continue", "Submit Application", "Apply", "Review"]:
+                try:
+                    btn = page.query_selector(f'button:has-text("{btn_text}")')
+                    if btn and btn.is_visible():
+                        btn.click()
+                        clicked = True
+                        time.sleep(2)
+                        break
+                except Exception:
+                    continue
+
+            # Also try via JS if regular click didn't work
+            if not clicked:
+                try:
+                    clicked_js = page.evaluate("""
+                        () => {
+                            const btns = document.querySelectorAll('button, a, [role="button"]');
+                            for (const btn of btns) {
+                                const text = btn.textContent.toLowerCase().trim();
+                                if ((text === 'submit' || text === 'next' || text === 'continue' || 
+                                     text.includes('submit') || text.includes('apply')) && 
+                                    btn.offsetParent !== null) {
+                                    btn.click();
+                                    return true;
+                                }
+                            }
+                            return false;
+                        }
+                    """)
+                    if clicked_js:
+                        clicked = True
+                        time.sleep(2)
+                except Exception:
+                    pass
+
+            if not clicked:
+                break
+
+        # Final check
+        page_text = page.inner_text("body")[:1000].lower()
+        if any(w in page_text for w in ["successfully", "submitted", "applied", "thank you"]):
+            result["status"] = "submitted"
+            logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
+        else:
+            result["status"] = "incomplete"
+            result["error"] = "Could not complete wizard steps"
 
     except Exception as e:
         result["status"] = "error"
