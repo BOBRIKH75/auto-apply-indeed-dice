@@ -2,12 +2,16 @@ name: "Auto-Apply Indeed + Dice — Daily"
 
 on:
   schedule:
-    - cron: "0 17 * * *"  # 11:00 AM MT daily
+    # Run 4 times per day during business hours (UTC → Mountain Time)
+    - cron: "0 14 * * *"   # 8:00 AM MT — catch overnight postings
+    - cron: "0 17 * * *"   # 11:00 AM MT — mid-morning batch
+    - cron: "0 20 * * *"   # 2:00 PM MT — afternoon postings
+    - cron: "0 23 * * *"   # 5:00 PM MT — end of day postings
   workflow_dispatch:
     inputs:
       max_apply:
         description: "Max applications per platform"
-        default: "20"
+        default: "15"
       platform:
         description: "Platform to apply on (both, indeed, dice)"
         default: "both"
@@ -37,7 +41,7 @@ jobs:
         env:
           INDEED_EMAIL: ${{ secrets.INDEED_EMAIL }}
           INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
-          MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
+          MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_indeed.py
 
@@ -76,7 +80,7 @@ jobs:
         env:
           DICE_EMAIL: ${{ secrets.DICE_EMAIL }}
           DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
-          MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
+          MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_dice.py
 
