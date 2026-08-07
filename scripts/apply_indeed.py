@@ -106,59 +106,48 @@ def mark_applied(job: dict, applied: dict):
 
 
 def login_indeed(page):
-    """Login to Indeed using cookies (supports Google OAuth accounts)."""
-    logger.info("Logging into Indeed via cookies...")
-
-    if not INDEED_COOKIES:
-        logger.error("❌ INDEED_COOKIES not set!")
-        return False
-
-    # Set cookies BEFORE any navigation (avoids Indeed blocking first load)
-    cookies_to_set = []
-    for cookie_pair in INDEED_COOKIES.split(";"):
-        cookie_pair = cookie_pair.strip()
-        if "=" in cookie_pair:
-            name, value = cookie_pair.split("=", 1)
-            name = name.strip()
-            value = value.strip().strip('"')
-            cookies_to_set.append({
-                "name": name,
-                "value": value,
-                "domain": ".indeed.com",
-                "path": "/",
-            })
-
-    page.context.add_cookies(cookies_to_set)
-    logger.info(f"  Set {len(cookies_to_set)} cookies")
-
-    # Navigate with domcontentloaded (don't wait for full load — Indeed blocks headless)
+    """
+    Indeed blocks headless browsers aggressively (fingerprint + IP detection).
+    Cookie auth doesn't work from GitHub Actions IPs.
+    
+    Strategy: Use Indeed's PUBLIC search (no login needed for searching).
+    Save job URLs with 'Easy Apply' → email them for manual 1-click apply.
+    """
+    logger.info("Indeed mode: SEARCH-ONLY (Indeed blocks headless auto-apply)")
+    logger.info("  Will find jobs and save Easy Apply links for your email")
+    
+    # Set cookies anyway — might help with search results
+    if INDEED_COOKIES:
+        cookies_to_set = []
+        for cookie_pair in INDEED_COOKIES.split(";"):
+            cookie_pair = cookie_pair.strip()
+            if "=" in cookie_pair:
+                name, value = cookie_pair.split("=", 1)
+                cookies_to_set.append({
+                    "name": name.strip(),
+                    "value": value.strip().strip('"'),
+                    "domain": ".indeed.com",
+                    "path": "/",
+                })
+        page.context.add_cookies(cookies_to_set)
+    
+    # Navigate to Indeed search (public, no auth needed)
     try:
-        page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=30000)
-    except Exception:
-        logger.warning("  indeed.com load timed out, trying search page directly...")
-        try:
-            page.goto("https://www.indeed.com/jobs?q=Java+Spring+Boot&l=Remote", wait_until="domcontentloaded", timeout=30000)
-        except Exception as e:
-            logger.error(f"  Indeed completely unreachable: {e}")
-            return False
-
-    time.sleep(3)
-
-    # Verify login by checking page content
-    try:
-        page_text = page.inner_text("body")[:1000]
-        if "Welcome" in page_text or "My jobs" in page_text or "Account" in page_text or "Sign Out" in page_text:
-            logger.info("✅ Logged into Indeed via cookies")
-            return True
-        elif "Sign In" in page_text or "sign in" in page_text.lower():
-            logger.warning("⚠️ Cookies expired — Indeed requires re-authentication")
-            return False
-        else:
-            logger.info("✅ Indeed loaded — proceeding (can't verify login state)")
-            return True
-    except Exception:
-        logger.info("✅ Indeed page loaded — proceeding")
+        page.goto("https://www.indeed.com/jobs?q=Java+Spring+Boot+contract+remote&l=Remote&fromage=3", 
+                  wait_until="domcontentloaded", timeout=30000)
+        time.sleep(3)
+        logger.info("✅ Indeed search page loaded")
         return True
+    except Exception:
+        logger.warning("  Indeed search timed out, trying without filters...")
+        try:
+            page.goto("https://www.indeed.com/jobs?q=Java+developer+contract", 
+                      wait_until="domcontentloaded", timeout=30000)
+            time.sleep(3)
+            return True
+        except Exception as e:
+            logger.error(f"❌ Indeed completely blocked: {e}")
+            return False
 
 
 def search_jobs(page, query: str) -> list[dict]:
@@ -226,68 +215,19 @@ def search_jobs(page, query: str) -> list[dict]:
 
 
 def apply_to_job(page, job: dict) -> dict:
-    """Attempt to apply to a single Indeed job."""
-    result = {"title": job["title"], "company": job["company"], "url": job["url"], "status": "unknown", "error": ""}
-
-    try:
-        page.goto(job["url"])
-        time.sleep(2)
-
-        # Self-healing: check if redirected to login
-        if check_login_redirect(page):
-            result["status"] = "session_expired"
-            result["error"] = "Redirected to login — cookies expired"
-            return result
-
-        # Look for "Apply now" or "Easy Apply" button
-        apply_btn = None
-        for selector in [
-            'button:has-text("Apply now")',
-            'button:has-text("Apply on company site")',
-            'a:has-text("Apply now")',
-            '#indeedApplyButton',
-            'button[id*="apply"]',
-            'a[href*="apply"]',
-        ]:
-            try:
-                apply_btn = page.wait_for_selector(selector, timeout=3000)
-                if apply_btn:
-                    break
-            except PlaywrightTimeout:
-                continue
-
-        if not apply_btn:
-            result["status"] = "no_apply_button"
-            result["error"] = "Could not find Apply button"
-            take_screenshot(page, "indeed_no_apply_btn")
-            return result
-
-        # Click apply
-        apply_btn.click()
-        time.sleep(3)
-
-        # Self-healing: check if redirected to login after clicking apply
-        if check_login_redirect(page):
-            result["status"] = "session_expired"
-            result["error"] = "Login required for apply"
-            return result
-
-        # Check if it opened Indeed's apply flow or external site
-        current_url = page.url
-
-        if "indeed.com" in current_url and ("apply" in current_url or "viewjob" in current_url):
-            # Indeed's internal apply flow
-            result = handle_indeed_apply_flow(page, job, result)
-        else:
-            # External company site — can't auto-apply
-            result["status"] = "external_site"
-            result["error"] = f"Redirected to: {current_url[:50]}"
-
-    except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)[:100]
-        take_screenshot(page, "indeed_apply_exception")
-
+    """
+    Indeed blocks headless auto-apply (fingerprint + IP detection).
+    Instead: mark job as 'manual_apply' — these get emailed with clickable links.
+    User opens email → clicks 'Easy Apply' → done in 5 seconds (logged in on phone/laptop).
+    """
+    result = {
+        "title": job["title"], 
+        "company": job["company"], 
+        "url": job["url"], 
+        "status": "manual_apply",
+        "error": "Indeed requires manual 1-click apply from email"
+    }
+    logger.info(f"  📧 Saved for email: {job['title']} @ {job['company']}")
     return result
 
 
@@ -385,8 +325,8 @@ def main():
     logger.info("=" * 60)
 
     if not INDEED_COOKIES:
-        logger.error("❌ INDEED_COOKIES must be set!")
-        return
+        logger.warning("⚠️ INDEED_COOKIES not set — running in search-only mode anyway")
+        # Can still search public Indeed without login
 
     applied = load_applied()
     results = []
