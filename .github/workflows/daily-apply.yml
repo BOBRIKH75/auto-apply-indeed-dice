@@ -78,6 +78,8 @@ jobs:
         continue-on-error: true
         env:
           DICE_COOKIES: ${{ secrets.DICE_COOKIES }}
+          DICE_EMAIL: ${{ secrets.DICE_EMAIL }}
+          DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_dice.py

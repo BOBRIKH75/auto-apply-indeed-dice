@@ -18,6 +18,8 @@ logger = logging.getLogger("dice-apply")
 
 # Config
 DICE_COOKIES = os.environ.get("DICE_COOKIES", "")
+DICE_EMAIL = os.environ.get("DICE_EMAIL", "")
+DICE_PASSWORD = os.environ.get("DICE_PASSWORD", "")
 MAX_APPLY = int(os.environ.get("MAX_APPLY", "15"))
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 
@@ -81,47 +83,53 @@ def mark_applied(job: dict, applied: dict):
 
 
 def login_dice(page):
-    """Login to Dice using cookies (supports Google OAuth accounts)."""
-    logger.info("Logging into Dice via cookies...")
+    """Login to Dice — tries cookies first, then email/password fallback."""
+    logger.info("Logging into Dice...")
 
-    if not DICE_COOKIES:
-        logger.error("❌ DICE_COOKIES not set!")
-        return False
+    # Try cookies first
+    if DICE_COOKIES:
+        page.goto("https://www.dice.com/")
+        time.sleep(2)
+        cookies_to_set = []
+        for cookie_pair in DICE_COOKIES.split(";"):
+            cookie_pair = cookie_pair.strip()
+            if "=" in cookie_pair:
+                name, value = cookie_pair.split("=", 1)
+                cookies_to_set.append({
+                    "name": name.strip(),
+                    "value": value.strip().strip('"'),
+                    "domain": ".dice.com",
+                    "path": "/",
+                })
+        page.context.add_cookies(cookies_to_set)
+        page.goto("https://www.dice.com/home-feed")
+        time.sleep(3)
+        if "home-feed" in page.url or "dashboard" in page.url:
+            logger.info("✅ Logged into Dice via cookies")
+            return True
 
-    # Navigate to Dice first
-    page.goto("https://www.dice.com/")
-    time.sleep(2)
+    # Fallback: email + password
+    if DICE_EMAIL and DICE_PASSWORD:
+        logger.info("  Cookies failed, trying email/password...")
+        page.goto("https://www.dice.com/dashboard/login")
+        time.sleep(3)
+        try:
+            email_input = page.wait_for_selector('input[name="email"], input[type="email"]', timeout=5000)
+            email_input.fill(DICE_EMAIL)
+            page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Continue")')
+            time.sleep(3)
+            pass_input = page.wait_for_selector('input[name="password"], input[type="password"]', timeout=5000)
+            pass_input.fill(DICE_PASSWORD)
+            page.click('button[type="submit"], button:has-text("Sign In")')
+            time.sleep(4)
+            if "dice.com" in page.url and "login" not in page.url:
+                logger.info("✅ Logged into Dice via email/password")
+                return True
+        except Exception as e:
+            logger.warning(f"  Email/password login failed: {e}")
 
-    # Set cookies
-    cookies_to_set = []
-    for cookie_pair in DICE_COOKIES.split(";"):
-        cookie_pair = cookie_pair.strip()
-        if "=" in cookie_pair:
-            name, value = cookie_pair.split("=", 1)
-            name = name.strip()
-            value = value.strip().strip('"')
-            cookies_to_set.append({
-                "name": name,
-                "value": value,
-                "domain": ".dice.com",
-                "path": "/",
-            })
-
-    page.context.add_cookies(cookies_to_set)
-    logger.info(f"  Set {len(cookies_to_set)} cookies")
-
-    # Reload with cookies
-    page.goto("https://www.dice.com/")
-    time.sleep(3)
-
-    # Verify
-    page_text = page.inner_text("body")[:500]
-    if "profile" in page_text.lower() or "dashboard" in page_text.lower() or "sign out" in page_text.lower():
-        logger.info("✅ Logged into Dice via cookies")
-        return True
-    else:
-        logger.warning("⚠️ Dice cookie login may have failed — trying anyway")
-        return True
+    logger.warning("⚠️ Could not verify Dice login — proceeding anyway")
+    return True
 
 
 def search_jobs(page, query: str) -> list[dict]:
@@ -284,8 +292,8 @@ def main():
     logger.info(f"Max applications: {MAX_APPLY}")
     logger.info("=" * 60)
 
-    if not DICE_COOKIES:
-        logger.error("❌ DICE_COOKIES must be set!")
+    if not DICE_COOKIES and not DICE_EMAIL:
+        logger.error("❌ Either DICE_COOKIES or DICE_EMAIL+DICE_PASSWORD must be set!")
         return
 
     applied = load_applied()
