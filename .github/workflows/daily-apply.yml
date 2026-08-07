@@ -1,0 +1,71 @@
+name: "Auto-Apply Indeed + Dice — Daily"
+
+on:
+  schedule:
+    - cron: "0 17 * * *"  # 11:00 AM MT daily
+  workflow_dispatch:
+    inputs:
+      max_apply:
+        description: "Max applications per platform"
+        default: "20"
+      platform:
+        description: "Platform to apply on (both, indeed, dice)"
+        default: "both"
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install chromium
+
+      - name: Apply on Indeed
+        if: ${{ github.event.inputs.platform != 'dice' }}
+        continue-on-error: true
+        env:
+          INDEED_EMAIL: ${{ secrets.INDEED_EMAIL }}
+          INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
+          MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
+          HEADLESS: "1"
+        run: python scripts/apply_indeed.py
+
+      - name: Apply on Dice
+        if: ${{ github.event.inputs.platform != 'indeed' }}
+        continue-on-error: true
+        env:
+          DICE_EMAIL: ${{ secrets.DICE_EMAIL }}
+          DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
+          MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
+          HEADLESS: "1"
+        run: python scripts/apply_dice.py
+
+      - name: Send email report
+        env:
+          RESEND_KEY: ${{ secrets.RESEND_KEY }}
+        run: python scripts/send_report.py
+
+      - name: Save applied jobs history
+        run: |
+          git config user.email "bot@bobrikh.dev"
+          git config user.name "Auto-Apply Bot"
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "chore: update applied jobs $(date +%Y-%m-%d)"
+          git push || true
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: apply-results-${{ github.run_number }}
+          path: data/
