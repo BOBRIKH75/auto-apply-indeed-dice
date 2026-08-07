@@ -90,8 +90,17 @@ def login_indeed(page):
         logger.error("❌ INDEED_COOKIES not set!")
         return False
 
-    # Navigate to Indeed first
-    page.goto("https://www.indeed.com/")
+    # Navigate to Indeed first (with extended timeout)
+    try:
+        page.goto("https://www.indeed.com/", timeout=60000)
+    except Exception:
+        logger.warning("  First load timed out, retrying...")
+        try:
+            page.goto("https://www.indeed.com/", timeout=60000)
+        except Exception as e:
+            logger.error(f"  Indeed unreachable: {e}")
+            return False
+
     time.sleep(2)
 
     # Set cookies from the stored session
@@ -132,7 +141,11 @@ def search_jobs(page, query: str) -> list[dict]:
     jobs = []
     url = f"https://www.indeed.com/jobs?q={query.replace(' ', '+')}&l=Remote&sc=0kf%3Ajt%28contract%29%3B&fromage=3&sort=date"
     logger.info(f"  Searching: {query}")
-    page.goto(url)
+    try:
+        page.goto(url, timeout=60000)
+    except Exception:
+        logger.warning(f"    Page load timeout for: {query}")
+        return jobs
     time.sleep(4)
 
     # Wait for job cards to render

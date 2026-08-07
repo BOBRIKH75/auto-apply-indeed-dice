@@ -202,46 +202,67 @@ def apply_to_job(page, job: dict) -> dict:
 
     try:
         page.goto(job["url"])
-        time.sleep(3)
+        time.sleep(4)  # Wait for full page load
 
-        # Look for "Easy Apply" or "Apply" button
+        # Dice uses various apply button patterns
         apply_btn = None
         for selector in [
+            'apply-button-wc',                          # Dice's web component
             'button:has-text("Easy Apply")',
+            'button:has-text("Apply Now")',
             'button:has-text("Apply")',
-            'apply-button-wc',
+            'a:has-text("Easy Apply")',
+            'a:has-text("Apply Now")',
             'a:has-text("Apply")',
+            '[data-cy="apply-button"]',
             '#applyButton',
+            'dhi-wc-apply-button',                      # Another web component name
+            '.btn-apply',
         ]:
             try:
-                apply_btn = page.wait_for_selector(selector, timeout=3000)
-                if apply_btn and apply_btn.is_visible():
+                el = page.query_selector(selector)
+                if el and el.is_visible():
+                    apply_btn = el
                     break
-                apply_btn = None
-            except PlaywrightTimeout:
+            except Exception:
                 continue
+
+        # Also try clicking inside shadow DOM (Dice uses web components)
+        if not apply_btn:
+            try:
+                # Try to find any clickable element with "apply" text
+                page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('button, a, [role="button"]');
+                        for (const btn of btns) {
+                            if (btn.textContent.toLowerCase().includes('apply') && btn.offsetParent !== null) {
+                                btn.click();
+                                return true;
+                            }
+                        }
+                        return false;
+                    }
+                """)
+                time.sleep(3)
+                # Check if apply modal appeared
+                page_text = page.inner_text("body")[:1000].lower()
+                if "submit" in page_text or "resume" in page_text or "application" in page_text:
+                    apply_btn = True  # Clicked via JS
+            except Exception:
+                pass
 
         if not apply_btn:
             result["status"] = "no_apply_button"
             result["error"] = "No Apply button found"
             return result
 
-        # Check if it's "Easy Apply" (Dice internal) or external
-        btn_text = apply_btn.inner_text().lower()
-        apply_btn.click()
-        time.sleep(3)
+        # If we found a button element (not already clicked via JS)
+        if apply_btn is not True:
+            apply_btn.click()
+            time.sleep(3)
 
-        if "easy" in btn_text:
-            # Dice Easy Apply — usually 1-click with profile
-            result = handle_dice_easy_apply(page, job, result)
-        else:
-            # May redirect to external site
-            current_url = page.url
-            if "dice.com" in current_url:
-                result = handle_dice_easy_apply(page, job, result)
-            else:
-                result["status"] = "external_site"
-                result["error"] = f"External: {current_url[:50]}"
+        # Handle the apply flow
+        result = handle_dice_easy_apply(page, job, result)
 
     except Exception as e:
         result["status"] = "error"
