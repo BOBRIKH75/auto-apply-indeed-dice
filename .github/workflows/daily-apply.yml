@@ -16,9 +16,9 @@ permissions:
   contents: write
 
 jobs:
-  apply:
+  apply-indeed:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -29,7 +29,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install playwright requests
-          playwright install chromium
+          playwright install firefox
 
       - name: Apply on Indeed
         if: ${{ github.event.inputs.platform != 'dice' }}
@@ -39,7 +39,36 @@ jobs:
           INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
           HEADLESS: "1"
-        run: python scripts/apply_indeed.py
+        run: cd scripts && python apply_indeed.py
+
+      - name: Upload Indeed results
+        uses: actions/upload-artifact@v4
+        with:
+          name: indeed-results-${{ github.run_number }}
+          path: data/
+
+      - name: Save applied jobs
+        run: |
+          git config user.email "bot@bobrikh.dev"
+          git config user.name "Auto-Apply Bot"
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "chore: indeed applied $(date +%Y-%m-%d)"
+          git push || true
+
+  apply-dice:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          pip install playwright requests
+          playwright install firefox
 
       - name: Apply on Dice
         if: ${{ github.event.inputs.platform != 'indeed' }}
@@ -49,23 +78,51 @@ jobs:
           DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '20' }}
           HEADLESS: "1"
-        run: python scripts/apply_dice.py
+        run: cd scripts && python apply_dice.py
+
+      - name: Upload Dice results
+        uses: actions/upload-artifact@v4
+        with:
+          name: dice-results-${{ github.run_number }}
+          path: data/
+
+      - name: Save applied jobs
+        run: |
+          git config user.email "bot@bobrikh.dev"
+          git config user.name "Auto-Apply Bot"
+          git add data/ || true
+          git diff --staged --quiet || git commit -m "chore: dice applied $(date +%Y-%m-%d)"
+          git push || true
+
+  send-report:
+    runs-on: ubuntu-latest
+    needs: [apply-indeed, apply-dice]
+    if: always()
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Download Indeed results
+        uses: actions/download-artifact@v4
+        with:
+          name: indeed-results-${{ github.run_number }}
+          path: data/
+        continue-on-error: true
+
+      - name: Download Dice results
+        uses: actions/download-artifact@v4
+        with:
+          name: dice-results-${{ github.run_number }}
+          path: data/
+        continue-on-error: true
 
       - name: Send email report
         env:
           RESEND_KEY: ${{ secrets.RESEND_KEY }}
         run: python scripts/send_report.py
-
-      - name: Save applied jobs history
-        run: |
-          git config user.email "bot@bobrikh.dev"
-          git config user.name "Auto-Apply Bot"
-          git add data/ || true
-          git diff --staged --quiet || git commit -m "chore: update applied jobs $(date +%Y-%m-%d)"
-          git push || true
-
-      - name: Upload results
-        uses: actions/upload-artifact@v4
-        with:
-          name: apply-results-${{ github.run_number }}
-          path: data/
