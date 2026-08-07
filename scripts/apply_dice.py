@@ -135,7 +135,7 @@ def login_dice(page):
 def search_jobs(page, query: str) -> list[dict]:
     """Search Dice for contract jobs using their search page with proper wait."""
     jobs = []
-    url = f"https://www.dice.com/jobs?q={query.replace(' ', '%20')}&countryCode=US&radius=30&radiusUnit=mi&page=1&pageSize=20&filters.employmentType=CONTRACTS&language=en"
+    url = f"https://www.dice.com/jobs?q={query.replace(' ', '%20')}&countryCode=US&radius=30&radiusUnit=mi&page=1&pageSize=20&filters.employmentType=CONTRACTS&filters.easyApply=true&language=en"
     logger.info(f"  Searching: {query}")
     page.goto(url)
 
@@ -252,6 +252,22 @@ def apply_to_job(page, job: dict) -> dict:
                 pass
 
         if not apply_btn:
+            # Debug: log what buttons ARE on the page
+            try:
+                all_buttons = page.evaluate("""
+                    () => {
+                        const btns = document.querySelectorAll('button, a[class*=btn], [role="button"]');
+                        return Array.from(btns).slice(0, 10).map(b => ({
+                            tag: b.tagName,
+                            text: b.textContent.trim().slice(0, 50),
+                            visible: b.offsetParent !== null
+                        }));
+                    }
+                """)
+                logger.info(f"    DEBUG buttons on page: {json.dumps(all_buttons[:5])}")
+            except Exception:
+                pass
+
             result["status"] = "no_apply_button"
             result["error"] = "No Apply button found"
             return result
