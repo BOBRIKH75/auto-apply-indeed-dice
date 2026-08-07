@@ -94,18 +94,21 @@ def main():
 </div></body></html>
 """
 
-    if not RESEND_KEY:
-        print("⚠️ RESEND_KEY not set — report saved locally only")
+    if not RESEND_KEY or not RESEND_KEY.strip().startswith("re_"):
+        print("⚠️ RESEND_KEY not set or invalid — report saved locally only")
         report_path = DATA_DIR / "last_report.html"
         with open(report_path, "w") as f:
             f.write(html)
         print(f"Saved to {report_path}")
         return
 
+    # Clean the key (remove any whitespace/newlines)
+    clean_key = RESEND_KEY.strip()
+
     # Send email
     resp = requests.post(
         "https://api.resend.com/emails",
-        headers={"Authorization": f"Bearer {RESEND_KEY}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {clean_key}", "Content-Type": "application/json"},
         json={
             "from": "Auto-Apply Bot <onboarding@resend.dev>",
             "to": ["bobrikh75@gmail.com"],
