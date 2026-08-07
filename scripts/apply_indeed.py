@@ -211,8 +211,9 @@ def search_jobs(sb, query: str) -> list:
 
     try:
         sb.goto(url)
-        sb.sleep(3)
+        sb.sleep(5)  # Indeed needs extra time for JS rendering
         sb.solve_captcha()
+        sb.sleep(3)  # Additional wait for React hydration
     except Exception as e:
         logger.warning(f"    Page load failed for: {query} — {e}")
         return jobs
@@ -231,7 +232,7 @@ def search_jobs(sb, query: str) -> list:
         "li[class*='css-']",  # React-rendered list items
     ]:
         try:
-            sb.wait_for_element_present(selector, timeout=5)
+            sb.wait_for_element_present(selector, timeout=15)
             page_loaded = True
             logger.info(f"    Job cards found with: {selector}")
             break
@@ -239,9 +240,14 @@ def search_jobs(sb, query: str) -> list:
             continue
 
     if not page_loaded:
-        # Try waiting for ANY content
+        # Try waiting for ANY content — scroll to trigger lazy loading
         sb.sleep(5)
-        page_text = sb.get_page_source()[:500]
+        try:
+            sb.scroll_down(3)
+            sb.sleep(3)
+        except Exception:
+            pass
+        page_text = sb.get_page_source()[:3000]
         if "job" in page_text.lower() or "result" in page_text.lower():
             page_loaded = True
             logger.info("    Page has content — trying to parse")
@@ -250,11 +256,17 @@ def search_jobs(sb, query: str) -> list:
             take_screenshot(sb, f"no_results_{query[:20]}")
             # Save page source for debugging
             try:
-                src = sb.get_page_source()[:2000]
-                logger.info(f"    Page source preview: {src[:300]}")
+                src = sb.get_page_source()
+                # Check full page for job keywords
+                if "viewjob" in src.lower() or "data-jk" in src.lower() or "jobTitle" in src:
+                    logger.info(f"    FOUND job content in full page source! Length: {len(src)}")
+                    page_loaded = True
+                else:
+                    logger.info(f"    Page source length: {len(src)}, first 500: {src[:500]}")
             except Exception:
                 pass
-            return jobs
+            if not page_loaded:
+                return jobs
 
     # Parse jobs using BeautifulSoup for reliable extraction
     try:
