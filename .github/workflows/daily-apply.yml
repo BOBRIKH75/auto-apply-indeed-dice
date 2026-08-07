@@ -42,15 +42,11 @@ jobs:
         run: cd scripts && python apply_indeed.py
 
       - name: Upload Indeed results
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: indeed-results-${{ github.run_number }}
           path: data/
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: indeed-screenshots-${{ github.run_number }}
-          path: screenshots/
           if-no-files-found: ignore
 
       - name: Save applied jobs
