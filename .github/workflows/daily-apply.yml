@@ -50,6 +50,14 @@ jobs:
           name: indeed-results-${{ github.run_number }}
           path: data/
 
+      - name: Upload Indeed debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: indeed-screenshots-${{ github.run_number }}
+          path: screenshots/
+          if-no-files-found: ignore
+
       - name: Save applied jobs
         run: |
           git config user.email "bot@bobrikh.dev"
@@ -89,6 +97,14 @@ jobs:
         with:
           name: dice-results-${{ github.run_number }}
           path: data/
+
+      - name: Upload debug screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dice-screenshots-${{ github.run_number }}
+          path: screenshots/
+          if-no-files-found: ignore
 
       - name: Save applied jobs
         run: |

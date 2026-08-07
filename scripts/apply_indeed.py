@@ -24,6 +24,9 @@ HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent / "screenshots"
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
+
 SEARCH_QUERIES = [
     "Java Spring Boot contract remote",
     "Java developer contract C2C remote",
@@ -31,6 +34,26 @@ SEARCH_QUERIES = [
     "Spring Boot developer contract",
     "Java backend developer contract remote",
 ]
+
+
+def take_screenshot(page, name: str):
+    """Save a debug screenshot."""
+    try:
+        path = SCREENSHOTS_DIR / f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        page.screenshot(path=str(path))
+        logger.info(f"  📸 Screenshot saved: {path.name}")
+    except Exception as e:
+        logger.warning(f"  Screenshot failed: {e}")
+
+
+def check_login_redirect(page) -> bool:
+    """Self-healing: detect if page redirected to login (session expired)."""
+    url = page.url.lower()
+    if any(x in url for x in ["login", "signin", "sign-in", "account/verify"]):
+        logger.error("❌ SELF-HEALING: Detected redirect to login page — session expired!")
+        take_screenshot(page, "indeed_session_expired")
+        return True
+    return False
 
 
 def load_applied():
@@ -208,6 +231,12 @@ def apply_to_job(page, job: dict) -> dict:
         page.goto(job["url"])
         time.sleep(2)
 
+        # Self-healing: check if redirected to login
+        if check_login_redirect(page):
+            result["status"] = "session_expired"
+            result["error"] = "Redirected to login — cookies expired"
+            return result
+
         # Look for "Apply now" or "Easy Apply" button
         apply_btn = None
         for selector in [
@@ -228,11 +257,18 @@ def apply_to_job(page, job: dict) -> dict:
         if not apply_btn:
             result["status"] = "no_apply_button"
             result["error"] = "Could not find Apply button"
+            take_screenshot(page, "indeed_no_apply_btn")
             return result
 
         # Click apply
         apply_btn.click()
         time.sleep(3)
+
+        # Self-healing: check if redirected to login after clicking apply
+        if check_login_redirect(page):
+            result["status"] = "session_expired"
+            result["error"] = "Login required for apply"
+            return result
 
         # Check if it opened Indeed's apply flow or external site
         current_url = page.url
@@ -248,6 +284,7 @@ def apply_to_job(page, job: dict) -> dict:
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)[:100]
+        take_screenshot(page, "indeed_apply_exception")
 
     return result
 
@@ -352,6 +389,7 @@ def main():
     applied = load_applied()
     results = []
     applied_count = 0
+    session_expired = False
 
     with sync_playwright() as p:
         # Use stealth browser (Firefox + anti-detection)
@@ -401,6 +439,11 @@ def main():
             if applied_count >= MAX_APPLY:
                 break
 
+            # Self-healing: stop if session expired
+            if session_expired:
+                logger.error("🛑 Session expired — stopping all applications")
+                break
+
             logger.info(f"\nApplying to: {job['title']} @ {job['company']}")
 
             # Human-like: scroll, move mouse, pause before applying
@@ -414,11 +457,16 @@ def main():
             if result["status"] == "submitted":
                 mark_applied(job, applied)
                 applied_count += 1
+            elif result["status"] == "session_expired":
+                session_expired = True
+                logger.error("🛑 Session expired — stopping early")
+                break
             else:
                 logger.info(f"  ⚠️ {result['status']}: {result['error']}")
 
             # CRITICAL: Wait 15-45 seconds between applications (avoids rate limiting)
-            between_applications_delay()
+            if not session_expired:
+                between_applications_delay()
 
         browser.close()
 

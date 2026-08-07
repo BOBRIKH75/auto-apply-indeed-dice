@@ -26,6 +26,9 @@ HEADLESS = os.environ.get("HEADLESS", "1") == "1"
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
+SCREENSHOTS_DIR = Path(__file__).resolve().parent.parent / "screenshots"
+SCREENSHOTS_DIR.mkdir(exist_ok=True)
+
 SEARCH_QUERIES = [
     "Java Spring Boot contract",
     "Java developer contract remote",
@@ -33,6 +36,84 @@ SEARCH_QUERIES = [
     "Spring Boot backend contract",
     "Java AWS Kubernetes contract",
 ]
+
+# Multiple selectors for Dice login form (SPA — Next.js, fields may render late)
+EMAIL_SELECTORS = [
+    'input[name="email"]',
+    '#email',
+    'input[type="email"]',
+    '[data-testid="email-input"]',
+    'input[placeholder*="email" i]',
+    'input[placeholder*="Email"]',
+]
+
+PASSWORD_SELECTORS = [
+    'input[name="password"]',
+    '#password',
+    'input[type="password"]',
+    '[data-testid="password-input"]',
+    'input[placeholder*="password" i]',
+]
+
+SUBMIT_SELECTORS = [
+    'button[type="submit"]',
+    'button:has-text("Sign In")',
+    'button:has-text("Log In")',
+    'button:has-text("Continue")',
+    '[data-testid="submit-button"]',
+    '[data-testid="sign-in-button"]',
+]
+
+
+def take_screenshot(page, name: str):
+    """Save a debug screenshot."""
+    try:
+        path = SCREENSHOTS_DIR / f"{name}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+        page.screenshot(path=str(path))
+        logger.info(f"  📸 Screenshot saved: {path.name}")
+    except Exception as e:
+        logger.warning(f"  Screenshot failed: {e}")
+
+
+def find_element(page, selectors: list, timeout: int = 15000):
+    """Try multiple selectors — return the first element found."""
+    for selector in selectors:
+        try:
+            el = page.wait_for_selector(selector, timeout=timeout)
+            if el:
+                logger.info(f"    Found element with selector: {selector}")
+                return el
+        except PlaywrightTimeout:
+            continue
+        except Exception:
+            continue
+    return None
+
+
+def click_button(page, selectors: list, timeout: int = 10000):
+    """Try multiple selectors to find and click a button."""
+    for selector in selectors:
+        try:
+            btn = page.wait_for_selector(selector, timeout=timeout)
+            if btn and btn.is_visible():
+                btn.click()
+                logger.info(f"    Clicked button with selector: {selector}")
+                return True
+        except PlaywrightTimeout:
+            continue
+        except Exception:
+            continue
+    return False
+
+
+def check_login_redirect(page) -> bool:
+    """Self-healing: detect if page redirected to login (session expired)."""
+    url = page.url.lower()
+    if "login" in url or "signin" in url or "sign-in" in url:
+        logger.error("❌ SELF-HEALING: Detected redirect to login page — session expired!")
+        take_screenshot(page, "session_expired")
+        return True
+    return False
 
 
 def load_applied():
@@ -83,34 +164,106 @@ def mark_applied(job: dict, applied: dict):
 
 
 def login_dice(page):
-    """Login to Dice — uses email/password for full session (required for wizard apply)."""
+    """Login to Dice — uses email/password with multi-selector fallback for SPA form."""
     logger.info("Logging into Dice...")
 
-    # MUST use email/password — cookies don't work for the apply wizard
     if DICE_EMAIL and DICE_PASSWORD:
+        logger.info("  Navigating to Dice login page...")
         page.goto("https://www.dice.com/dashboard/login", timeout=60000)
-        time.sleep(4)
-        try:
-            # Enter email
-            email_input = page.wait_for_selector('input[name="email"], input[type="email"]', timeout=10000)
-            email_input.fill(DICE_EMAIL)
-            page.click('button[type="submit"], button:has-text("Sign In"), button:has-text("Continue")')
-            time.sleep(4)
+        time.sleep(5)  # Give SPA time to hydrate
 
-            # Enter password
-            pass_input = page.wait_for_selector('input[name="password"], input[type="password"]', timeout=10000)
+        try:
+            # Step 1: Find and fill email field
+            logger.info("  Looking for email field...")
+            email_input = find_element(page, EMAIL_SELECTORS, timeout=15000)
+            if not email_input:
+                logger.error("❌ Could not find email input field")
+                take_screenshot(page, "dice_login_no_email_field")
+                # Log page content for debugging
+                try:
+                    page_html = page.content()[:3000]
+                    logger.info(f"  Page URL: {page.url}")
+                    logger.info(f"  Page title: {page.title()}")
+                except Exception:
+                    pass
+                return False
+
+            email_input.click()
+            time.sleep(0.5)
+            email_input.fill(DICE_EMAIL)
+            logger.info("  ✅ Email entered")
+            time.sleep(2)
+
+            # Step 2: Try to click a "Continue" or "Next" button if there's a two-step flow
+            # Some login forms show email first, then password on next screen
+            logger.info("  Looking for submit/continue button after email...")
+            clicked = click_button(page, SUBMIT_SELECTORS, timeout=5000)
+            if clicked:
+                logger.info("  Clicked submit after email — checking for password field...")
+                time.sleep(5)  # Wait for potential page transition
+
+            # Step 3: Find and fill password field
+            logger.info("  Looking for password field...")
+            pass_input = find_element(page, PASSWORD_SELECTORS, timeout=15000)
+            if not pass_input:
+                # Maybe we're already past login (single-step with email only?)
+                if "login" not in page.url.lower():
+                    logger.info("  ✅ Appears to be logged in after email step")
+                    return True
+                logger.error("❌ Could not find password input field")
+                take_screenshot(page, "dice_login_no_password_field")
+                return False
+
+            pass_input.click()
+            time.sleep(0.5)
             pass_input.fill(DICE_PASSWORD)
-            page.click('button[type="submit"], button:has-text("Sign In")')
+            logger.info("  ✅ Password entered")
+            time.sleep(2)
+
+            # Step 4: Click the submit/sign-in button
+            logger.info("  Clicking sign-in button...")
+            clicked = click_button(page, SUBMIT_SELECTORS, timeout=10000)
+            if not clicked:
+                # Try pressing Enter as fallback
+                logger.info("  No button found — pressing Enter...")
+                pass_input.press("Enter")
+
+            # Step 5: Wait for login to complete
             time.sleep(5)
 
-            # Verify login
-            if "login" not in page.url.lower():
-                logger.info("✅ Logged into Dice via email/password (full session)")
+            # Step 6: Navigate to home-feed to verify login
+            logger.info("  Verifying login by navigating to home-feed...")
+            page.goto("https://www.dice.com/home-feed", timeout=30000)
+            time.sleep(3)
+
+            # Check if we're logged in
+            current_url = page.url.lower()
+            if "login" in current_url or "signin" in current_url:
+                logger.error("❌ Dice login failed — redirected back to login page")
+                take_screenshot(page, "dice_login_failed_redirect")
+                return False
+
+            # Additional check: look for logged-in indicators
+            try:
+                page_text = page.inner_text("body")[:2000].lower()
+                if any(w in page_text for w in ["profile", "job alerts", "my jobs", "home feed", "recommended"]):
+                    logger.info("✅ Logged into Dice via email/password (full session)")
+                    return True
+            except Exception:
+                pass
+
+            # If we're on home-feed and not redirected to login, consider it success
+            if "home-feed" in page.url or "dashboard" in page.url:
+                logger.info("✅ Logged into Dice (URL confirms home-feed/dashboard)")
                 return True
-            else:
-                logger.error("❌ Dice login failed — still on login page")
+
+            logger.warning("⚠️ Login status unclear — proceeding anyway")
+            take_screenshot(page, "dice_login_unclear")
+            return True
+
         except Exception as e:
             logger.error(f"❌ Dice email/password login failed: {e}")
+            take_screenshot(page, "dice_login_exception")
 
     # Fallback: cookies (may only work for search, not wizard)
     if DICE_COOKIES:
@@ -136,6 +289,7 @@ def login_dice(page):
             return True
 
     logger.error("❌ All Dice login methods failed")
+    take_screenshot(page, "dice_login_all_failed")
     return False
 
 
@@ -219,7 +373,13 @@ def apply_to_job(page, job: dict) -> dict:
         page.goto(wizard_url, timeout=30000)
         time.sleep(4)
 
-        # Check if we landed on the wizard or got redirected
+        # Self-healing: check if redirected to login
+        if check_login_redirect(page):
+            result["status"] = "session_expired"
+            result["error"] = "Redirected to login — session expired"
+            return result
+
+        # Check current state
         current_url = page.url
         page_text = page.inner_text("body")[:2000].lower()
 
@@ -230,20 +390,12 @@ def apply_to_job(page, job: dict) -> dict:
             return result
 
         # Check for errors/redirects
-        if "login" in current_url.lower() or "sign" in current_url.lower():
-            result["status"] = "not_logged_in"
-            result["error"] = "Redirected to login — cookies expired"
-            return result
-
         if "error" in page_text[:200] or "not found" in page_text[:200]:
             result["status"] = "wizard_error"
             result["error"] = "Wizard page not available"
             return result
 
         # We're on the wizard — look for resume/submit flow
-        # Step 1: Check if resume is pre-selected (usually is from profile)
-        # Step 2: Click through to submit
-
         max_steps = 5
         for step in range(max_steps):
             time.sleep(2)
@@ -253,6 +405,12 @@ def apply_to_job(page, job: dict) -> dict:
             if any(w in page_text for w in ["successfully", "submitted", "thank you", "application received", "applied"]):
                 result["status"] = "submitted"
                 logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
+                return result
+
+            # Self-healing: check for login redirect mid-wizard
+            if check_login_redirect(page):
+                result["status"] = "session_expired"
+                result["error"] = "Session expired during wizard"
                 return result
 
             # Find and click the next/submit button
@@ -303,61 +461,12 @@ def apply_to_job(page, job: dict) -> dict:
         else:
             result["status"] = "incomplete"
             result["error"] = "Could not complete wizard steps"
+            take_screenshot(page, f"dice_wizard_incomplete_{job_id[:8]}")
 
     except Exception as e:
         result["status"] = "error"
         result["error"] = str(e)[:100]
-
-    return result
-
-
-def handle_dice_easy_apply(page, job: dict, result: dict) -> dict:
-    """Handle Dice's Easy Apply flow."""
-    try:
-        time.sleep(2)
-
-        # Dice Easy Apply is usually a modal/overlay
-        # Check for "Submit" or "Apply" confirmation
-        for attempt in range(3):
-            # Look for submit button in modal
-            submit_btn = None
-            for sel in [
-                'button:has-text("Submit")',
-                'button:has-text("Next")',
-                'button:has-text("Apply")',
-                'button[type="submit"]',
-            ]:
-                try:
-                    btn = page.query_selector(sel)
-                    if btn and btn.is_visible():
-                        submit_btn = btn
-                        break
-                except Exception:
-                    continue
-
-            if submit_btn:
-                submit_btn.click()
-                time.sleep(2)
-
-            # Check if applied
-            page_text = page.inner_text("body")[:1000].lower()
-            if any(w in page_text for w in ["successfully applied", "application submitted", "thank you for applying", "you have applied"]):
-                result["status"] = "submitted"
-                logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
-                return result
-
-        # If we got here, check final state
-        page_text = page.inner_text("body")[:500].lower()
-        if "applied" in page_text or "submitted" in page_text:
-            result["status"] = "submitted"
-            logger.info(f"  ✅ APPLIED: {job['title']} @ {job['company']}")
-        else:
-            result["status"] = "incomplete"
-            result["error"] = "Could not confirm submission"
-
-    except Exception as e:
-        result["status"] = "error"
-        result["error"] = str(e)[:100]
+        take_screenshot(page, "dice_apply_exception")
 
     return result
 
@@ -376,6 +485,7 @@ def main():
     applied = load_applied()
     results = []
     applied_count = 0
+    session_expired = False
 
     with sync_playwright() as p:
         # Use stealth browser (Firefox + anti-detection)
@@ -425,6 +535,11 @@ def main():
             if applied_count >= MAX_APPLY:
                 break
 
+            # Self-healing: stop if session expired
+            if session_expired:
+                logger.error("🛑 Session expired — stopping all applications")
+                break
+
             logger.info(f"\nApplying to: {job['title']} @ {job['company']}")
 
             # Human-like behavior before applying
@@ -438,11 +553,16 @@ def main():
             if result["status"] == "submitted":
                 mark_applied(job, applied)
                 applied_count += 1
+            elif result["status"] == "session_expired":
+                session_expired = True
+                logger.error("🛑 Session expired — stopping early")
+                break
             else:
                 logger.info(f"  ⚠️ {result['status']}: {result['error']}")
 
             # CRITICAL: 15-45 second delay between applications
-            between_applications_delay()
+            if not session_expired:
+                between_applications_delay()
 
         browser.close()
 
@@ -459,6 +579,8 @@ def main():
     logger.info(f"DICE APPLY COMPLETE")
     logger.info(f"  ✅ Applied: {len(submitted)}")
     logger.info(f"  ❌ Failed:  {len(results) - len(submitted)}")
+    if session_expired:
+        logger.info(f"  🛑 Session expired — stopped early")
     logger.info(f"{'='*60}")
 
 

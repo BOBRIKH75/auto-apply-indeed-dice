@@ -4,3 +4,4 @@ __pycache__/
 data/applied_*.json
 data/last_report.html
 data/apply_results_*.json
+screenshots/*.png
