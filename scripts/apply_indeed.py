@@ -162,7 +162,7 @@ def login_indeed(sb) -> bool:
 
     try:
         # First navigation — needed before cookies can be set
-        sb.goto("https://www.indeed.com")
+        sb.open("https://www.indeed.com")
         sb.sleep(3)
         sb.solve_captcha()  # Auto-handles any CAPTCHA
 
@@ -170,7 +170,7 @@ def login_indeed(sb) -> bool:
         set_indeed_cookies(sb)
 
         # Navigate to search page
-        sb.goto(
+        sb.open(
             "https://www.indeed.com/jobs?q=Java+Spring+Boot+contract+remote&l=Remote&fromage=3",
         )
         sb.sleep(3)
@@ -210,63 +210,37 @@ def search_jobs(sb, query: str) -> list:
     logger.info(f"  Searching: {query}")
 
     try:
-        sb.goto(url)
-        sb.sleep(5)  # Indeed needs extra time for JS rendering
+        sb.open(url)
+        sb.sleep(4)
         sb.solve_captcha()
-        sb.sleep(3)  # Additional wait for React hydration
+        sb.sleep(2)
+        # Scroll to trigger lazy-loaded content
+        for _ in range(3):
+            sb.scroll_down(5)
+            sb.sleep(1)
     except Exception as e:
         logger.warning(f"    Page load failed for: {query} — {e}")
         return jobs
 
-    # Wait for job cards to render — try multiple selectors
-    page_loaded = False
-    for selector in [
-        "div.job_seen_beacon",
-        "td.resultContent",
-        "div[class*='cardOutline']",
-        "div[class*='job']",
-        "a[data-jk]",
-        "div[class*='mosaic']",
-        "#mosaic-provider-jobcards",
-        "ul.css-zu9cdl",  # Indeed's job list
-        "li[class*='css-']",  # React-rendered list items
-    ]:
-        try:
-            sb.wait_for_element_present(selector, timeout=15)
-            page_loaded = True
-            logger.info(f"    Job cards found with: {selector}")
-            break
-        except Exception:
-            continue
-
-    if not page_loaded:
-        # Try waiting for ANY content — scroll to trigger lazy loading
-        sb.sleep(5)
-        try:
-            sb.scroll_down(3)
-            sb.sleep(3)
-        except Exception:
-            pass
-        page_text = sb.get_page_source()[:3000]
-        if "job" in page_text.lower() or "result" in page_text.lower():
-            page_loaded = True
-            logger.info("    Page has content — trying to parse")
-        else:
-            logger.warning(f"    No results rendered for: {query}")
+    # Check if page has job content using JavaScript (fastest way)
+    try:
+        page_html = sb.get_page_source()
+        has_jobs = ("viewjob" in page_html or "data-jk" in page_html or 
+                    "jobTitle" in page_html or "job_seen_beacon" in page_html or
+                    "resultContent" in page_html)
+        if not has_jobs:
+            logger.warning(f"    No job content in page source for: {query}")
             take_screenshot(sb, f"no_results_{query[:20]}")
-            # Save page source for debugging
-            try:
-                src = sb.get_page_source()
-                # Check full page for job keywords
-                if "viewjob" in src.lower() or "data-jk" in src.lower() or "jobTitle" in src:
-                    logger.info(f"    FOUND job content in full page source! Length: {len(src)}")
-                    page_loaded = True
-                else:
-                    logger.info(f"    Page source length: {len(src)}, first 500: {src[:500]}")
-            except Exception:
-                pass
-            if not page_loaded:
-                return jobs
+            logger.info(f"    Page source length: {len(page_html)}")
+            # Log a sample of the page to understand structure
+            import re as _re
+            classes = _re.findall(r'class="([^"]{5,30})"', page_html[:5000])
+            logger.info(f"    CSS classes found: {classes[:10]}")
+            return jobs
+        logger.info(f"    ✅ Job content detected in page source")
+    except Exception as e:
+        logger.warning(f"    Could not check page source: {e}")
+        # Continue anyway — try to parse
 
     # Parse jobs using BeautifulSoup for reliable extraction
     try:
@@ -361,7 +335,7 @@ def apply_to_job(sb, job: dict) -> dict:
 
     try:
         # Navigate to job page
-        sb.goto(job["url"])
+        sb.open(job["url"])
         sb.sleep(3)
         sb.solve_captcha()
 
