@@ -217,21 +217,78 @@ def search_jobs(sb, query: str) -> list:
         logger.warning(f"    Page load failed for: {query} — {e}")
         return jobs
 
-    # Wait for job cards to render
-    try:
-        sb.wait_for_element_present(
-            "div.job_seen_beacon, td.resultContent, div[class*='cardOutline']",
-            timeout=10,
-        )
-    except Exception:
-        logger.warning(f"    No results rendered for: {query}")
-        take_screenshot(sb, f"no_results_{query[:20]}")
-        return jobs
+    # Wait for job cards to render — try multiple selectors
+    page_loaded = False
+    for selector in [
+        "div.job_seen_beacon",
+        "td.resultContent",
+        "div[class*='cardOutline']",
+        "div[class*='job']",
+        "a[data-jk]",
+        "div[class*='mosaic']",
+        "#mosaic-provider-jobcards",
+        "ul.css-zu9cdl",  # Indeed's job list
+        "li[class*='css-']",  # React-rendered list items
+    ]:
+        try:
+            sb.wait_for_element_present(selector, timeout=5)
+            page_loaded = True
+            logger.info(f"    Job cards found with: {selector}")
+            break
+        except Exception:
+            continue
+
+    if not page_loaded:
+        # Try waiting for ANY content
+        sb.sleep(5)
+        page_text = sb.get_page_source()[:500]
+        if "job" in page_text.lower() or "result" in page_text.lower():
+            page_loaded = True
+            logger.info("    Page has content — trying to parse")
+        else:
+            logger.warning(f"    No results rendered for: {query}")
+            take_screenshot(sb, f"no_results_{query[:20]}")
+            # Save page source for debugging
+            try:
+                src = sb.get_page_source()[:2000]
+                logger.info(f"    Page source preview: {src[:300]}")
+            except Exception:
+                pass
+            return jobs
 
     # Parse jobs using BeautifulSoup for reliable extraction
     try:
         soup = sb.get_beautiful_soup()
-        title_links = soup.select("h2.jobTitle a, a[data-jk], h2 a[id^='job']")
+
+        # Try multiple selector strategies for Indeed's ever-changing DOM
+        title_links = []
+        for selector in [
+            "h2.jobTitle a",
+            "a[data-jk]",
+            "h2 a[id^='job']",
+            "a[id*='job']",
+            "a[href*='/viewjob']",
+            "a[href*='jk=']",
+            "h2 a",  # Broad fallback
+        ]:
+            title_links = soup.select(selector)
+            if title_links:
+                logger.info(f"    Found {len(title_links)} jobs with selector: {selector}")
+                break
+
+        if not title_links:
+            # Ultra-fallback: find any link containing "viewjob" or "jk=" in href
+            all_links = soup.find_all("a", href=True)
+            title_links = [a for a in all_links if "/viewjob" in a.get("href", "") or "jk=" in a.get("href", "")]
+            if title_links:
+                logger.info(f"    Found {len(title_links)} jobs via href fallback")
+            else:
+                logger.warning(f"    No job links found in page HTML")
+                # Log what IS on the page for debugging
+                all_h2 = soup.find_all("h2")
+                logger.info(f"    H2 tags on page: {[h.get_text(strip=True)[:30] for h in all_h2[:5]]}")
+                all_a_count = len(soup.find_all("a"))
+                logger.info(f"    Total links on page: {all_a_count}")
 
         for link in title_links[:15]:
             try:
