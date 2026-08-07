@@ -113,20 +113,7 @@ def login_indeed(page):
         logger.error("❌ INDEED_COOKIES not set!")
         return False
 
-    # Navigate to Indeed first (with extended timeout)
-    try:
-        page.goto("https://www.indeed.com/", timeout=60000)
-    except Exception:
-        logger.warning("  First load timed out, retrying...")
-        try:
-            page.goto("https://www.indeed.com/", timeout=60000)
-        except Exception as e:
-            logger.error(f"  Indeed unreachable: {e}")
-            return False
-
-    time.sleep(2)
-
-    # Set cookies from the stored session
+    # Set cookies BEFORE any navigation (avoids Indeed blocking first load)
     cookies_to_set = []
     for cookie_pair in INDEED_COOKIES.split(";"):
         cookie_pair = cookie_pair.strip()
@@ -141,22 +128,37 @@ def login_indeed(page):
                 "path": "/",
             })
 
-    # Add cookies to browser context
     page.context.add_cookies(cookies_to_set)
     logger.info(f"  Set {len(cookies_to_set)} cookies")
 
-    # Reload page with cookies
-    page.goto("https://www.indeed.com/")
+    # Navigate with domcontentloaded (don't wait for full load — Indeed blocks headless)
+    try:
+        page.goto("https://www.indeed.com/", wait_until="domcontentloaded", timeout=30000)
+    except Exception:
+        logger.warning("  indeed.com load timed out, trying search page directly...")
+        try:
+            page.goto("https://www.indeed.com/jobs?q=Java+Spring+Boot&l=Remote", wait_until="domcontentloaded", timeout=30000)
+        except Exception as e:
+            logger.error(f"  Indeed completely unreachable: {e}")
+            return False
+
     time.sleep(3)
 
-    # Verify login by checking for account menu
-    page_text = page.inner_text("body")[:500]
-    if "Welcome" in page_text or "My jobs" in page_text or "Account" in page_text:
-        logger.info("✅ Logged into Indeed via cookies")
+    # Verify login by checking page content
+    try:
+        page_text = page.inner_text("body")[:1000]
+        if "Welcome" in page_text or "My jobs" in page_text or "Account" in page_text or "Sign Out" in page_text:
+            logger.info("✅ Logged into Indeed via cookies")
+            return True
+        elif "Sign In" in page_text or "sign in" in page_text.lower():
+            logger.warning("⚠️ Cookies expired — Indeed requires re-authentication")
+            return False
+        else:
+            logger.info("✅ Indeed loaded — proceeding (can't verify login state)")
+            return True
+    except Exception:
+        logger.info("✅ Indeed page loaded — proceeding")
         return True
-    else:
-        logger.warning("⚠️ Cookie login may have failed — trying anyway")
-        return True  # Try anyway — cookies might still work for applying
 
 
 def search_jobs(page, query: str) -> list[dict]:
@@ -165,7 +167,7 @@ def search_jobs(page, query: str) -> list[dict]:
     url = f"https://www.indeed.com/jobs?q={query.replace(' ', '+')}&l=Remote&sc=0kf%3Ajt%28contract%29%3B&fromage=3&sort=date"
     logger.info(f"  Searching: {query}")
     try:
-        page.goto(url, timeout=60000)
+        page.goto(url, wait_until="domcontentloaded", timeout=30000)
     except Exception:
         logger.warning(f"    Page load timeout for: {query}")
         return jobs
