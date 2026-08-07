@@ -130,35 +130,54 @@ def login_indeed(page):
 def search_jobs(page, query: str) -> list[dict]:
     """Search Indeed for jobs matching query."""
     jobs = []
-    url = f"https://www.indeed.com/jobs?q={query.replace(' ', '+')}&l=Remote&sc=0kf%3Ajt%28contract%29%3B&fromage=3"
+    url = f"https://www.indeed.com/jobs?q={query.replace(' ', '+')}&l=Remote&sc=0kf%3Ajt%28contract%29%3B&fromage=3&sort=date"
     logger.info(f"  Searching: {query}")
     page.goto(url)
-    time.sleep(3)
+    time.sleep(4)
+
+    # Wait for job cards to render
+    try:
+        page.wait_for_selector('div.job_seen_beacon, td.resultContent, div[class*="cardOutline"]', timeout=10000)
+    except PlaywrightTimeout:
+        logger.warning(f"    No results rendered for: {query}")
+        return jobs
 
     try:
-        job_cards = page.query_selector_all('div.job_seen_beacon, div.slider_container, a[data-jk]')
-        for card in job_cards[:15]:
+        # Get all job title links
+        title_links = page.query_selector_all('h2.jobTitle a, a[data-jk], h2 a[id^="job"]')
+
+        for link in title_links[:15]:
             try:
-                title_el = card.query_selector('h2.jobTitle span, h2 a span')
-                company_el = card.query_selector('[data-testid="company-name"], span.companyName')
-                link_el = card.query_selector('a[data-jk], h2 a')
+                title = link.inner_text().strip()
+                href = link.get_attribute("href") or ""
+                job_id = link.get_attribute("data-jk") or ""
 
-                title = title_el.inner_text() if title_el else ""
-                company = company_el.inner_text() if company_el else ""
-                href = link_el.get_attribute("href") if link_el else ""
-                job_id = link_el.get_attribute("data-jk") if link_el else ""
-
+                # Extract job ID from href if not in data-jk
                 if not job_id and href:
                     import re
                     match = re.search(r'jk=([a-f0-9]+)', href)
-                    job_id = match.group(1) if match else href[:32]
+                    if match:
+                        job_id = match.group(1)
+                    else:
+                        job_id = href[:32]
+
+                if not href.startswith("http"):
+                    href = f"https://www.indeed.com{href}"
+
+                # Get company from nearby element
+                company = ""
+                parent = link.evaluate_handle("el => el.closest('.job_seen_beacon') || el.closest('.resultContent') || el.closest('td')")
+                if parent:
+                    comp_el = parent.query_selector('[data-testid="company-name"], span.companyName, span[class*="company"]')
+                    if comp_el:
+                        company = comp_el.inner_text().strip()
 
                 if title and job_id:
                     jobs.append({
                         "title": title,
-                        "company": company,
+                        "company": company or "Unknown",
                         "job_id": job_id,
-                        "url": f"https://www.indeed.com/viewjob?jk={job_id}" if job_id else href,
+                        "url": f"https://www.indeed.com/viewjob?jk={job_id}" if len(job_id) < 20 else href,
                     })
             except Exception:
                 continue

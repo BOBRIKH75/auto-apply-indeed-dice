@@ -20,12 +20,24 @@ def main():
     dice_path = DATA_DIR / "apply_results_dice.json"
 
     if indeed_path.exists():
-        with open(indeed_path) as f:
-            indeed_results = json.load(f)
+        try:
+            with open(indeed_path) as f:
+                indeed_results = json.load(f)
+        except (json.JSONDecodeError, Exception):
+            indeed_results = []
 
     if dice_path.exists():
-        with open(dice_path) as f:
-            dice_results = json.load(f)
+        try:
+            with open(dice_path) as f:
+                dice_results = json.load(f)
+        except (json.JSONDecodeError, Exception):
+            dice_results = []
+
+    if not indeed_results and not dice_results:
+        print("ℹ️ No results to report — both platforms returned empty")
+        # Still send a notification
+        indeed_results = []
+        dice_results = []
 
     indeed_applied = [r for r in indeed_results if r["status"] == "submitted"]
     dice_applied = [r for r in dice_results if r["status"] == "submitted"]

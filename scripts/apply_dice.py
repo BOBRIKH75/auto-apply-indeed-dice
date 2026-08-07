@@ -133,49 +133,65 @@ def login_dice(page):
 
 
 def search_jobs(page, query: str) -> list[dict]:
-    """Search Dice for contract jobs."""
+    """Search Dice for contract jobs using their search page with proper wait."""
     jobs = []
-    url = f"https://www.dice.com/jobs?q={query.replace(' ', '%20')}&contracttype=CONTRACTOR&radius=0&radiusUnit=mi&page=1&pageSize=20&language=en"
+    url = f"https://www.dice.com/jobs?q={query.replace(' ', '%20')}&countryCode=US&radius=30&radiusUnit=mi&page=1&pageSize=20&filters.employmentType=CONTRACTS&language=en"
     logger.info(f"  Searching: {query}")
     page.goto(url)
-    time.sleep(3)
 
+    # Wait for job cards to render (Dice is a SPA — needs time)
+    time.sleep(5)
+
+    # Try to wait for job cards to appear
     try:
-        # Dice job cards
-        job_cards = page.query_selector_all('dhi-search-card, a[data-cy="card-title-link"]')
+        page.wait_for_selector('a[id^="job-card-title-link"]', timeout=10000)
+    except PlaywrightTimeout:
+        # Try alternative: wait for any job title links
+        try:
+            page.wait_for_selector('a[href*="/job-detail/"]', timeout=5000)
+        except PlaywrightTimeout:
+            logger.warning(f"    No job cards found for: {query}")
+            return jobs
 
-        if not job_cards:
-            # Try alternative selectors
-            job_cards = page.query_selector_all('[data-testid="job-search-result"], .card-title-link')
+    # Extract jobs from the rendered page
+    try:
+        job_links = page.query_selector_all('a[id^="job-card-title-link"], a[href*="/job-detail/"]')
 
-        for card in job_cards[:15]:
+        seen_urls = set()
+        for link in job_links[:20]:
             try:
-                # Get job link and title
-                link_el = card.query_selector('a[data-cy="card-title-link"], a.card-title-link') or card
-                title = link_el.inner_text().strip() if link_el else ""
-                href = link_el.get_attribute("href") or ""
+                href = link.get_attribute("href") or ""
+                title = link.inner_text().strip()
 
-                company_el = card.query_selector('[data-cy="card-company"], .card-company a')
-                company = company_el.inner_text().strip() if company_el else ""
+                if not href or href in seen_urls or not title:
+                    continue
+                seen_urls.add(href)
 
                 if not href.startswith("http"):
                     href = f"https://www.dice.com{href}"
 
                 # Extract job ID from URL
-                job_id = href.split("/")[-1] if href else ""
+                job_id = href.split("/")[-1].split("?")[0] if href else ""
 
-                if title and job_id:
-                    jobs.append({
-                        "title": title,
-                        "company": company,
-                        "job_id": job_id,
-                        "url": href,
-                    })
+                # Try to get company name from nearby elements
+                company = ""
+                parent = link.evaluate_handle("el => el.closest('[class*=card]') || el.parentElement.parentElement")
+                if parent:
+                    company_el = parent.query_selector('[data-cy="card-company"] a, a[href*="/company-profile/"]')
+                    if company_el:
+                        company = company_el.inner_text().strip()
+
+                jobs.append({
+                    "title": title,
+                    "company": company or "Unknown",
+                    "job_id": job_id,
+                    "url": href,
+                })
             except Exception:
                 continue
 
     except Exception as e:
-        logger.warning(f"  Search error: {e}")
+        logger.warning(f"    Job extraction error: {e}")
 
     return jobs
 
