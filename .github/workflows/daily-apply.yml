@@ -39,8 +39,7 @@ jobs:
         if: ${{ github.event.inputs.platform != 'dice' }}
         continue-on-error: true
         env:
-          INDEED_EMAIL: ${{ secrets.INDEED_EMAIL }}
-          INDEED_PASSWORD: ${{ secrets.INDEED_PASSWORD }}
+          INDEED_COOKIES: ${{ secrets.INDEED_COOKIES }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_indeed.py
@@ -78,8 +77,7 @@ jobs:
         if: ${{ github.event.inputs.platform != 'indeed' }}
         continue-on-error: true
         env:
-          DICE_EMAIL: ${{ secrets.DICE_EMAIL }}
-          DICE_PASSWORD: ${{ secrets.DICE_PASSWORD }}
+          DICE_COOKIES: ${{ secrets.DICE_COOKIES }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
           HEADLESS: "1"
         run: cd scripts && python apply_dice.py

@@ -17,11 +17,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger("indeed-apply")
 
 # Config
-INDEED_EMAIL = os.environ.get("INDEED_EMAIL", "")
-INDEED_PASSWORD = os.environ.get("INDEED_PASSWORD", "")
-MAX_APPLY = int(os.environ.get("MAX_APPLY", "20"))
+INDEED_COOKIES = os.environ.get("INDEED_COOKIES", "")
+MAX_APPLY = int(os.environ.get("MAX_APPLY", "15"))
 HEADLESS = os.environ.get("HEADLESS", "1") == "1"
-RESUME_PATH = os.environ.get("RESUME_PATH", "config/resume.pdf")
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
@@ -85,34 +83,48 @@ def mark_applied(job: dict, applied: dict):
 
 
 def login_indeed(page):
-    """Login to Indeed account."""
-    logger.info("Logging into Indeed...")
-    page.goto("https://secure.indeed.com/auth?hl=en_US&co=US&continue=https%3A%2F%2Fwww.indeed.com%2F")
+    """Login to Indeed using cookies (supports Google OAuth accounts)."""
+    logger.info("Logging into Indeed via cookies...")
+
+    if not INDEED_COOKIES:
+        logger.error("❌ INDEED_COOKIES not set!")
+        return False
+
+    # Navigate to Indeed first
+    page.goto("https://www.indeed.com/")
     time.sleep(2)
 
-    # Enter email
-    page.fill('input[name="__email"]', INDEED_EMAIL)
-    page.click('button[type="submit"]')
+    # Set cookies from the stored session
+    cookies_to_set = []
+    for cookie_pair in INDEED_COOKIES.split(";"):
+        cookie_pair = cookie_pair.strip()
+        if "=" in cookie_pair:
+            name, value = cookie_pair.split("=", 1)
+            name = name.strip()
+            value = value.strip().strip('"')
+            cookies_to_set.append({
+                "name": name,
+                "value": value,
+                "domain": ".indeed.com",
+                "path": "/",
+            })
+
+    # Add cookies to browser context
+    page.context.add_cookies(cookies_to_set)
+    logger.info(f"  Set {len(cookies_to_set)} cookies")
+
+    # Reload page with cookies
+    page.goto("https://www.indeed.com/")
     time.sleep(3)
 
-    # Enter password (if password page shows)
-    try:
-        page.wait_for_selector('input[name="__password"]', timeout=5000)
-        page.fill('input[name="__password"]', INDEED_PASSWORD)
-        page.click('button[type="submit"]')
-        time.sleep(3)
-    except PlaywrightTimeout:
-        # May use different auth flow (Google, etc)
-        logger.warning("Password field not found — may need manual auth or different flow")
-
-    # Verify login
-    try:
-        page.wait_for_url("**/indeed.com/**", timeout=10000)
-        logger.info("✅ Logged into Indeed")
+    # Verify login by checking for account menu
+    page_text = page.inner_text("body")[:500]
+    if "Welcome" in page_text or "My jobs" in page_text or "Account" in page_text:
+        logger.info("✅ Logged into Indeed via cookies")
         return True
-    except PlaywrightTimeout:
-        logger.error("❌ Indeed login failed")
-        return False
+    else:
+        logger.warning("⚠️ Cookie login may have failed — trying anyway")
+        return True  # Try anyway — cookies might still work for applying
 
 
 def search_jobs(page, query: str) -> list[dict]:
@@ -301,8 +313,8 @@ def main():
     logger.info(f"Max applications: {MAX_APPLY}")
     logger.info("=" * 60)
 
-    if not INDEED_EMAIL or not INDEED_PASSWORD:
-        logger.error("❌ INDEED_EMAIL and INDEED_PASSWORD must be set!")
+    if not INDEED_COOKIES:
+        logger.error("❌ INDEED_COOKIES must be set!")
         return
 
     applied = load_applied()
