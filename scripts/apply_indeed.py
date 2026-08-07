@@ -551,7 +551,7 @@ def main():
     # CDP mode: enables stealth browser interactions
     from seleniumbase import SB
 
-    with SB(uc=True, test=True, guest=True, headless2=HEADLESS) as sb:
+    with SB(uc=True, test=True, guest=True) as sb:
         sb.activate_cdp_mode()
 
         # Login / initial navigation
