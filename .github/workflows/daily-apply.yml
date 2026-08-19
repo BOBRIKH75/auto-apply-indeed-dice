@@ -31,15 +31,26 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install requests beautifulsoup4 python-jobspy
+        run: |
+          pip install requests beautifulsoup4 python-jobspy playwright
+          playwright install firefox --with-deps
 
-      - name: Apply on Indeed
+      - name: Find Indeed jobs (search + save links)
         if: ${{ github.event.inputs.platform != 'dice' }}
         continue-on-error: true
         env:
           SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
           MAX_APPLY: ${{ github.event.inputs.max_apply || '15' }}
         run: cd scripts && python apply_indeed.py
+
+      - name: Auto-apply Indeed (browser)
+        if: ${{ github.event.inputs.platform != 'dice' }}
+        continue-on-error: true
+        env:
+          INDEED_COOKIES: ${{ secrets.INDEED_COOKIES }}
+          MAX_APPLY: "10"
+          HEADLESS: "1"
+        run: cd scripts && python apply_indeed_auto.py
 
       - name: Upload Indeed results
         if: always()
