@@ -346,6 +346,100 @@ def apply_to_job(page, job: dict) -> str:
         return f"error: {str(e)[:50]}"
 
 
+def auto_login_indeed(page) -> bool:
+    """Auto-login to Indeed using email + Gmail OTP (no manual cookies needed).
+    
+    Flow:
+    1. Go to Indeed sign-in page
+    2. Enter email
+    3. Indeed sends verification code to Gmail
+    4. Read code from Gmail via IMAP (gmail_otp.py)
+    5. Enter code on Indeed
+    6. Login complete
+    """
+    from gmail_otp import read_indeed_otp
+    
+    try:
+        gmail_user = os.environ.get("GMAIL_USER", "bobrikh75@gmail.com")
+        
+        logger.info("  Step 1: Opening Indeed sign-in page...")
+        page.goto("https://secure.indeed.com/auth", timeout=30000)
+        time.sleep(3)
+        
+        # Enter email
+        logger.info("  Step 2: Entering email...")
+        email_input = page.locator('input[type="email"], input[name="__email"], #ifl-InputFormField-3')
+        if email_input.count() == 0:
+            # Try alternative selectors
+            email_input = page.locator('input[autocomplete="email"], input[name="email"]')
+        
+        if email_input.count() == 0:
+            logger.error("  ❌ Cannot find email input on Indeed login page")
+            take_screenshot(page, "login_no_email_field")
+            return False
+        
+        email_input.first.fill(gmail_user)
+        time.sleep(1)
+        
+        # Click submit/continue
+        logger.info("  Step 3: Submitting email...")
+        submit_btn = page.locator('button[type="submit"], button:has-text("Continue"), button:has-text("Sign in")')
+        if submit_btn.count() > 0:
+            submit_btn.first.click()
+        else:
+            email_input.first.press("Enter")
+        
+        time.sleep(5)
+        
+        # Check if Indeed asks for verification code
+        page_text = page.inner_text("body")[:2000].lower()
+        if "verification" in page_text or "code" in page_text or "enter" in page_text:
+            logger.info("  Step 4: Waiting for OTP from Gmail...")
+            
+            # Read OTP from Gmail (polls for up to 60 seconds)
+            otp = read_indeed_otp(max_wait_seconds=60, poll_interval=5)
+            
+            if not otp:
+                logger.error("  ❌ Could not read OTP from Gmail")
+                take_screenshot(page, "login_no_otp")
+                return False
+            
+            # Enter the OTP
+            logger.info(f"  Step 5: Entering OTP: {otp}")
+            otp_input = page.locator('input[type="text"], input[name="otp"], input[inputmode="numeric"]')
+            if otp_input.count() > 0:
+                otp_input.first.fill(otp)
+                time.sleep(1)
+                
+                # Submit OTP
+                verify_btn = page.locator('button[type="submit"], button:has-text("Verify"), button:has-text("Continue")')
+                if verify_btn.count() > 0:
+                    verify_btn.first.click()
+                else:
+                    otp_input.first.press("Enter")
+                
+                time.sleep(5)
+                
+                # Check if login succeeded
+                if "myjobs" in page.url or "indeed.com" in page.url and "auth" not in page.url:
+                    logger.info("  ✅ Indeed auto-login successful!")
+                    return True
+        
+        # Check if we're already logged in (some flows skip OTP)
+        if "auth" not in page.url.lower() and "sign" not in page.url.lower():
+            logger.info("  ✅ Indeed login successful (no OTP needed)")
+            return True
+        
+        logger.error("  ❌ Indeed login flow unclear")
+        take_screenshot(page, "login_unclear")
+        return False
+        
+    except Exception as e:
+        logger.error(f"  ❌ Indeed auto-login error: {str(e)[:100]}")
+        take_screenshot(page, "login_error")
+        return False
+
+
 def main():
     logger.info("=" * 60)
     logger.info("INDEED AUTO-APPLY (Playwright + Cookies)")
@@ -379,16 +473,17 @@ def main():
 
         page = context.new_page()
 
-        # Verify login
+        # Verify login — try cookies first, then auto-login with OTP
         if not verify_logged_in(page):
-            logger.error("❌ Indeed session expired — need fresh cookies")
-            logger.info("  Run: scripts/refresh_cookies.py to get new cookies")
-            take_screenshot(page, "not_logged_in")
-            browser.close()
-            # Save empty results
-            with open(DATA_DIR / "apply_results_indeed_auto.json", "w") as f:
-                json.dump([], f)
-            return
+            logger.info("  🔄 Cookies expired — attempting auto-login with Gmail OTP...")
+            login_success = auto_login_indeed(page)
+            if not login_success:
+                logger.error("❌ Indeed auto-login failed — skipping Indeed auto-apply")
+                take_screenshot(page, "login_failed")
+                browser.close()
+                with open(DATA_DIR / "apply_results_indeed_auto.json", "w") as f:
+                    json.dump([], f)
+                return
 
         # Search and apply
         for query in SEARCH_QUERIES:
