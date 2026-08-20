@@ -309,7 +309,16 @@ def search_jobs(page, query: str) -> list[dict]:
     jobs = []
     url = f"https://www.dice.com/jobs?q={query.replace(' ', '%20')}&countryCode=US&radius=30&radiusUnit=mi&page=1&pageSize=20&filters.employmentType=CONTRACTS&filters.easyApply=true&language=en"
     logger.info(f"  Searching: {query}")
-    page.goto(url)
+    try:
+        page.goto(url, timeout=60000)
+    except Exception as e:
+        logger.warning(f"  ⚠️ Search page slow ({str(e)[:50]}) — retrying...")
+        time.sleep(5)
+        try:
+            page.goto(url, timeout=60000)
+        except Exception:
+            logger.warning(f"  ❌ Search page failed — skipping query")
+            return jobs
 
     # Wait for job cards to render (Dice is a SPA — needs time)
     time.sleep(5)
